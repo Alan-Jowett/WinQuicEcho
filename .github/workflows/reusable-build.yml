@@ -1,0 +1,43 @@
+name: Reusable Build
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 WinQuicEcho contributors
+
+on:
+  workflow_call:
+    inputs:
+      build_dir:
+        required: false
+        type: string
+        default: build
+      artifact_name:
+        required: false
+        type: string
+        default: build-artifacts
+      config:
+        required: false
+        type: string
+        default: Release
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S . -B ${{ inputs.build_dir }} -A x64
+
+      - name: Build
+        run: cmake --build ${{ inputs.build_dir }} --config ${{ inputs.config }} --parallel
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.build_dir }}

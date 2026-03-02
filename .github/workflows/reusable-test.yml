@@ -1,0 +1,70 @@
+name: Reusable Test
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 WinQuicEcho contributors
+
+on:
+  workflow_call:
+    inputs:
+      build_dir:
+        required: false
+        type: string
+        default: build
+      artifact_name:
+        required: false
+        type: string
+        default: build-artifacts
+      config:
+        required: false
+        type: string
+        default: Release
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: downloaded_build/${{ inputs.build_dir }}
+
+      - name: Verify binaries
+        shell: pwsh
+        run: |
+          $serverPath = "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_server.exe"
+          $clientPath = "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_client.exe"
+          if (-not (Test-Path $serverPath)) {
+            Write-Error "Missing server binary: $serverPath"
+            exit 1
+          }
+          if (-not (Test-Path $clientPath)) {
+            Write-Error "Missing client binary: $clientPath"
+            exit 1
+          }
+
+      - name: Binary smoke checks
+        shell: pwsh
+        run: |
+          & "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_server.exe" --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_client.exe" --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run ctest if configured
+        shell: pwsh
+        run: |
+          $ctestFile = "./downloaded_build/${{ inputs.build_dir }}/CTestTestfile.cmake"
+          if (Test-Path $ctestFile) {
+            ctest --test-dir "./downloaded_build/${{ inputs.build_dir }}" --build-config "${{ inputs.config }}" --output-on-failure
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "No CTest tests configured; skipping."
+          }
