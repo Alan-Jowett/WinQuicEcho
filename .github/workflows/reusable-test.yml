@@ -68,7 +68,6 @@ jobs:
           & ./tests/integration/echo-roundtrip.ps1 `
               -BuildDir "./downloaded_build/${{ inputs.build_dir }}" `
               -Config "${{ inputs.config }}" `
-              -Port 15443 `
               -Duration 10 `
               -Connections 1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

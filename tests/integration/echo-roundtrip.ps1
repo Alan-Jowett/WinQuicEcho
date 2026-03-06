@@ -25,12 +25,22 @@ param(
     [string]$BuildDir,
 
     [string]$Config = "Release",
-    [int]$Port = 15443,
+    [int]$Port = 0,
     [int]$Duration = 5,
     [int]$Connections = 2
 )
 
 $ErrorActionPreference = "Stop"
+
+# Pick an available ephemeral port when none is specified.
+if ($Port -eq 0) {
+    $udpClient = [System.Net.Sockets.UdpClient]::new(0)
+    try {
+        $Port = ([System.Net.IPEndPoint]$udpClient.Client.LocalEndPoint).Port
+    } finally {
+        $udpClient.Dispose()
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Resolve binary paths - handle empty $Config for single-config generators.

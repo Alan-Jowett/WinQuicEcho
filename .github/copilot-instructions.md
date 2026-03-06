@@ -23,7 +23,7 @@ Integration test (requires a built tree and runs server+client with an ephemeral
 ctest --test-dir build -C Release
 
 # Directly (useful for tweaking parameters)
-.\tests\integration\echo-roundtrip.ps1 -BuildDir build -Config Release -Port 15443 -Duration 5 -Connections 2
+.\tests\integration\echo-roundtrip.ps1 -BuildDir build -Config Release -Duration 5 -Connections 2
 ```
 
 The test exits with code 77 (skip) if `msquic.dll` is not found, so CTest reports it as skipped on runners without QUIC.
