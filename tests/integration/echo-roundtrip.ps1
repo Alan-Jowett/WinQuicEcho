@@ -130,6 +130,7 @@ $statsFile = Join-Path $tempRunDir "stats.json"
 $serverLog = Join-Path $tempRunDir "server.log"
 $serverErr = Join-Path $tempRunDir "server-err.log"
 
+$exitCode = 0
 try {
     # -----------------------------------------------------------------
     # Start the server
@@ -173,8 +174,11 @@ try {
         $ec = $serverProcess.ExitCode
         $errText = if (Test-Path $serverErr) { Get-Content $serverErr -Raw } else { "(empty)" }
         $outText = if (Test-Path $serverLog) { Get-Content $serverLog -Raw } else { "(empty)" }
-        Write-Error ("Server exited prematurely (exit code " + $ec + ")." + "`nstdout: " + $outText + "`nstderr: " + $errText)
-        exit 1
+        Write-Host "ERROR: Server exited prematurely (exit code $ec)."
+        Write-Host "stdout: $outText"
+        Write-Host "stderr: $errText"
+        $exitCode = 1
+        return
     }
     Write-Host "Server running (PID $($serverProcess.Id))."
 
@@ -221,7 +225,8 @@ try {
 
     if (-not (Test-Path $statsFile)) {
         Write-Host "FAIL: Stats file was not created at: $statsFile"
-        exit 1
+        $exitCode = 1
+        return
     }
 
     $stats = Get-Content $statsFile -Raw | ConvertFrom-Json
@@ -250,14 +255,14 @@ try {
     }
 
     if ($testFailed) {
-        exit 1
+        $exitCode = 1
+        return
     }
 
     $rps = if ($stats.duration_s -gt 0) { [math]::Round($stats.requests_completed / $stats.duration_s, 1) } else { 0 }
     Write-Host ""
     Write-Host "PASS: Echo roundtrip integration test succeeded."
     Write-Host "  Effective RPS: $rps"
-    exit 0
 
 } finally {
     # -----------------------------------------------------------------
@@ -298,3 +303,5 @@ try {
         Remove-Item $tempRunDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+exit $exitCode

@@ -445,7 +445,7 @@ class msquic_backend final : public quic_backend {
 
             QUIC_REGISTRATION_CONFIG registration_config{};
             registration_config.AppName = "WinQuicEcho.Server";
-            registration_config.ExecutionProfile = QUIC_EXECUTION_PROFILE_LOW_LATENCY;
+            registration_config.ExecutionProfile = QUIC_EXECUTION_PROFILE_TYPE_MAX_THROUGHPUT;
             throw_on_failure(api->RegistrationOpen(&registration_config, &registration),
                              "RegistrationOpen failed");
 
@@ -611,7 +611,7 @@ class msquic_backend final : public quic_backend {
 
             QUIC_REGISTRATION_CONFIG registration_config{};
             registration_config.AppName = "WinQuicEcho.Client";
-            registration_config.ExecutionProfile = QUIC_EXECUTION_PROFILE_LOW_LATENCY;
+            registration_config.ExecutionProfile = QUIC_EXECUTION_PROFILE_TYPE_MAX_THROUGHPUT;
             throw_on_failure(api->RegistrationOpen(&registration_config, &registration),
                              "RegistrationOpen failed");
 
@@ -630,8 +630,8 @@ class msquic_backend final : public quic_backend {
             client_cred.Type = QUIC_CREDENTIAL_TYPE_NONE;
             client_cred.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
             if (options.insecure) {
-                client_cred.Flags = client_cred.Flags |
-                                    QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+                client_cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+                    client_cred.Flags | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
             }
             throw_on_failure(api->ConfigurationLoadCredential(configuration, &client_cred),
                              "ConfigurationLoadCredential failed");
