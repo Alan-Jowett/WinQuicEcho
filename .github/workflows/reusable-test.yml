@@ -35,21 +35,21 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
-          path: downloaded_build/${{ inputs.build_dir }}
+          path: downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}
 
       - name: Verify binaries
         shell: pwsh
         run: |
           $serverPath = "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_server.exe"
           $clientPath = "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_client.exe"
-          if (-not (Test-Path $serverPath)) {
-            Write-Error "Missing server binary: $serverPath"
-            exit 1
+          $msquicPath = "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/msquic.dll"
+          foreach ($p in @($serverPath, $clientPath, $msquicPath)) {
+            if (-not (Test-Path $p)) {
+              Write-Error "Missing: $p"
+              exit 1
+            }
           }
-          if (-not (Test-Path $clientPath)) {
-            Write-Error "Missing client binary: $clientPath"
-            exit 1
-          }
+          Write-Host "All binaries present."
 
       - name: Binary smoke checks
         shell: pwsh
@@ -59,13 +59,15 @@ jobs:
           & "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_client.exe" --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Run ctest if configured
+      - name: Echo roundtrip integration test
         shell: pwsh
         run: |
-          $ctestFile = "./downloaded_build/${{ inputs.build_dir }}/CTestTestfile.cmake"
-          if (Test-Path $ctestFile) {
-            ctest --test-dir "./downloaded_build/${{ inputs.build_dir }}" --build-config "${{ inputs.config }}" --output-on-failure
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } else {
-            Write-Host "No CTest tests configured; skipping."
-          }
+          # Run the integration test directly rather than via ctest, since the
+          # downloaded artifact's CTestTestfile.cmake has baked-in source paths
+          # from the build runner that won't resolve here.
+          & ./tests/integration/echo-roundtrip.ps1 `
+              -BuildDir "./downloaded_build/${{ inputs.build_dir }}" `
+              -Config "${{ inputs.config }}" `
+              -Duration 10 `
+              -Connections 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

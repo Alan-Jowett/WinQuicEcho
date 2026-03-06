@@ -23,7 +23,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "backends/msquic/msquic_minimal.hpp"
+#include <msquic.h>
+
 #include "common/metrics.hpp"
 #include "common/quic_factory.hpp"
 
@@ -31,7 +32,6 @@ namespace winquicecho {
 namespace {
 
 using steady_clock = std::chrono::steady_clock;
-constexpr uint32_t QUIC_PARAM_LISTENER_LOCAL_ADDRESS = 0;
 
 uint64_t now_ns() {
     return static_cast<uint64_t>(
@@ -49,10 +49,6 @@ void throw_on_failure(QUIC_STATUS status, const std::string& message) {
     if (QUIC_FAILED(status)) {
         throw std::runtime_error(message + " (status=" + status_to_string(status) + ")");
     }
-}
-
-QUIC_CREDENTIAL_FLAGS combine_flags(QUIC_CREDENTIAL_FLAGS a, QUIC_CREDENTIAL_FLAGS b) {
-    return static_cast<QUIC_CREDENTIAL_FLAGS>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
 }
 
 bool is_datagram_send_state_final(QUIC_DATAGRAM_SEND_STATE state) {
@@ -88,32 +84,13 @@ bool parse_sha1_hex(std::string text, QUIC_CERTIFICATE_HASH& hash) {
 class msquic_library {
   public:
     msquic_library() {
-        module_ = LoadLibraryA("msquic.dll");
-        if (module_ == nullptr) {
-            throw std::runtime_error(
-                "msquic.dll could not be loaded. Install the MsQuic runtime on Windows.");
-        }
-
-        open_ =
-            reinterpret_cast<QUIC_OPEN_VERSION_FN>(GetProcAddress(module_, "MsQuicOpenVersion"));
-        close_ = reinterpret_cast<QUIC_CLOSE_FN>(GetProcAddress(module_, "MsQuicClose"));
-        if (open_ == nullptr || close_ == nullptr) {
-            throw std::runtime_error("msquic.dll does not export MsQuicOpenVersion/MsQuicClose.");
-        }
-
-        QUIC_STATUS status = open_(QUIC_API_VERSION_2, &api_);
-        if (QUIC_FAILED(status)) {
-            status = open_(QUIC_API_VERSION_1, &api_);
-        }
-        throw_on_failure(status, "MsQuicOpenVersion failed");
+        QUIC_STATUS status = MsQuicOpen2(&api_);
+        throw_on_failure(status, "MsQuicOpen2 failed");
     }
 
     ~msquic_library() {
-        if (api_ != nullptr && close_ != nullptr) {
-            close_(api_);
-        }
-        if (module_ != nullptr) {
-            FreeLibrary(module_);
+        if (api_ != nullptr) {
+            MsQuicClose(api_);
         }
     }
 
@@ -123,9 +100,6 @@ class msquic_library {
     const QUIC_API_TABLE* api() const { return api_; }
 
   private:
-    HMODULE module_{nullptr};
-    QUIC_OPEN_VERSION_FN open_{nullptr};
-    QUIC_CLOSE_FN close_{nullptr};
     const QUIC_API_TABLE* api_{nullptr};
 };
 
@@ -176,13 +150,20 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
     switch (event->Type) {
         case QUIC_CONNECTION_EVENT_CONNECTED:
             if (state->verbose) {
-                std::cout << "[server] connection established\n";
+                std::cerr << "[server] connection established\n";
             }
             return QUIC_STATUS_SUCCESS;
         case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED: {
             const QUIC_BUFFER* received = event->DATAGRAM_RECEIVED.Buffer;
             if (received == nullptr) {
+                if (state->verbose) {
+                    std::cerr << "[server] datagram received with null buffer\n";
+                }
                 return QUIC_STATUS_SUCCESS;
+            }
+
+            if (state->verbose) {
+                std::cerr << "[server] datagram received bytes=" << received->Length << "\n";
             }
 
             auto* send_ctx = new datagram_send_context();
@@ -209,7 +190,7 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
             state->requests_echoed.fetch_add(1, std::memory_order_relaxed);
 
             if (state->verbose) {
-                std::cout << "[server] datagram echoed bytes=" << received->Length << "\n";
+                std::cerr << "[server] datagram echoed bytes=" << received->Length << "\n";
             }
             return QUIC_STATUS_SUCCESS;
         }
@@ -217,7 +198,7 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
             auto* send_ctx = reinterpret_cast<datagram_send_context*>(
                 event->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
             if (state->verbose) {
-                std::cout << "[server] datagram send state="
+                std::cerr << "[server] datagram send state="
                           << static_cast<int>(event->DATAGRAM_SEND_STATE_CHANGED.State) << "\n";
             }
             if (send_ctx != nullptr &&
@@ -227,6 +208,9 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
             return QUIC_STATUS_SUCCESS;
         }
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
+            if (state->verbose) {
+                std::cerr << "[server] connection shutdown complete\n";
+            }
             {
                 std::lock_guard<std::mutex> lock(state->connection_mutex);
                 state->live_connections.erase(connection);
@@ -236,7 +220,24 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
             delete connection_ctx;
             return QUIC_STATUS_SUCCESS;
         }
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+            if (state->verbose) {
+                std::cerr << "[server] transport shutdown status="
+                          << status_to_string(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status)
+                          << " errorCode=" << event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode << "\n";
+            }
+            return QUIC_STATUS_SUCCESS;
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+            if (state->verbose) {
+                std::cerr << "[server] peer shutdown errorCode="
+                          << event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode << "\n";
+            }
+            return QUIC_STATUS_SUCCESS;
         default:
+            if (state->verbose) {
+                std::cerr << "[server] connection event type="
+                          << static_cast<int>(event->Type) << "\n";
+            }
             return QUIC_STATUS_SUCCESS;
     }
 }
@@ -540,9 +541,9 @@ class msquic_backend final : public quic_backend {
                 }
             }
 
-            std::cout << "Server backend: msquic\n";
+            std::cout << "Server backend: msquic\n" << std::flush;
             std::cout << "Listening on UDP port " << options.port << " with ALPN '" << options.alpn
-                      << "'\n";
+                      << "'\n" << std::flush;
 
             const auto start = steady_clock::now();
             uint64_t previous = 0;
@@ -562,7 +563,7 @@ class msquic_backend final : public quic_backend {
                 std::cout << "RPS=" << rps
                           << " ActiveConnections="
                           << state.active_connections.load(std::memory_order_relaxed)
-                          << " TotalEchoed=" << current << "\n";
+                          << " TotalEchoed=" << current << "\n" << std::flush;
             }
 
             api->ListenerStop(listener);
@@ -629,8 +630,8 @@ class msquic_backend final : public quic_backend {
             client_cred.Type = QUIC_CREDENTIAL_TYPE_NONE;
             client_cred.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
             if (options.insecure) {
-                client_cred.Flags = combine_flags(client_cred.Flags,
-                                                  QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
+                client_cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+                    client_cred.Flags | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
             }
             throw_on_failure(api->ConfigurationLoadCredential(configuration, &client_cred),
                              "ConfigurationLoadCredential failed");
@@ -638,9 +639,11 @@ class msquic_backend final : public quic_backend {
             client_state state{};
             state.verbose = options.verbose;
 
-            const auto start = steady_clock::now();
-            const auto end_time = start + std::chrono::seconds(options.duration_seconds);
             const uint32_t worker_count = std::max<uint32_t>(1, options.connections);
+            // Workers signal when connected so the monitoring loop can start the
+            // benchmark clock after at least one connection is established.
+            std::atomic<uint32_t> connected_workers{0};
+            std::atomic<bool> stop_signal{false};
 
             std::vector<std::thread> workers;
             workers.reserve(worker_count);
@@ -695,15 +698,26 @@ class msquic_backend final : public quic_backend {
                             delete connection_ctx;
                             return;
                         }
-                        connection_ctx->cv.wait_for(
-                            lock, std::chrono::seconds(5),
-                            [&] { return connection_ctx->datagram_send_enabled; });
+                        if (!connection_ctx->cv.wait_for(
+                                lock, std::chrono::seconds(5),
+                                [&] { return connection_ctx->datagram_send_enabled; })) {
+                            if (state.verbose) {
+                                std::cerr << "[client] timeout waiting for datagram send to be enabled\n";
+                            }
+                            state.errors.fetch_add(1, std::memory_order_relaxed);
+                            api->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 1);
+                            api->ConnectionClose(connection);
+                            delete connection_ctx;
+                            return;
+                        }
                     }
+
+                    connected_workers.fetch_add(1, std::memory_order_release);
 
                     uint64_t sequence = static_cast<uint64_t>(worker) << 40;
                     const uint32_t payload_size = std::max<uint32_t>(16, options.payload_size);
 
-                    while (steady_clock::now() < end_time) {
+                    while (!stop_signal.load(std::memory_order_acquire)) {
                         const uint64_t request_sequence = ++sequence;
                         auto* send_ctx = new datagram_send_context();
                         uint32_t effective_payload_size = payload_size;
@@ -779,8 +793,30 @@ class msquic_backend final : public quic_backend {
                 });
             }
 
+            // Wait for at least one worker to connect before monitoring.
+            for (int i = 0; i < 100 && connected_workers.load(std::memory_order_acquire) == 0; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (connected_workers.load(std::memory_order_acquire) == 0) {
+                std::cerr << "[client] No workers connected after 10s – aborting.\n";
+                stop_signal.store(true, std::memory_order_release);
+                for (auto& worker : workers) {
+                    worker.join();
+                }
+                api->ConfigurationClose(configuration);
+                api->RegistrationClose(registration);
+                summary.exit_code = 1;
+                summary.errors = state.errors.load(std::memory_order_relaxed);
+                return summary;
+            }
+
+            // The monitoring loop runs for the benchmark duration (starting now).
+            const auto benchmark_start = steady_clock::now();
+            const auto monitor_end =
+                benchmark_start + std::chrono::seconds(options.duration_seconds);
             uint64_t prev_completed = 0;
-            while (steady_clock::now() < end_time) {
+            while (steady_clock::now() < monitor_end) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 const uint64_t completed = state.requests_completed.load(std::memory_order_relaxed);
                 const uint64_t rps = completed - prev_completed;
@@ -789,6 +825,9 @@ class msquic_backend final : public quic_backend {
                           << " Sent=" << state.requests_sent.load(std::memory_order_relaxed)
                           << " Errors=" << state.errors.load(std::memory_order_relaxed) << "\n";
             }
+
+            // Signal all workers to stop, then join.
+            stop_signal.store(true, std::memory_order_release);
 
             for (auto& worker : workers) {
                 worker.join();
@@ -799,7 +838,7 @@ class msquic_backend final : public quic_backend {
 
             const auto end = steady_clock::now();
             const double duration_seconds =
-                std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0;
+                std::chrono::duration_cast<std::chrono::milliseconds>(end - benchmark_start).count() / 1000.0;
 
             summary.exit_code = 0;
             summary.duration_seconds = duration_seconds;
