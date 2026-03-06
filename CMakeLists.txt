@@ -43,11 +43,19 @@ add_library(quic_backend_msquic
 target_include_directories(quic_backend_msquic PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(quic_backend_msquic PRIVATE quic_common ws2_32 msquic inc)
 
+# Kernel-mode backend — user-mode IOCTL client that talks to winquicecho_km.sys.
+# The kernel driver itself is built separately with WDK (see scripts/build-km-driver.ps1).
+add_library(quic_backend_msquic_km
+    src/backends/msquic_km/msquic_km_backend.cpp
+)
+target_include_directories(quic_backend_msquic_km PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(quic_backend_msquic_km PRIVATE quic_common)
+
 add_executable(echo_server
     src/server/main.cpp
 )
 target_include_directories(echo_server PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(echo_server PRIVATE quic_common quic_backend_msquic ws2_32)
+target_link_libraries(echo_server PRIVATE quic_common quic_backend_msquic quic_backend_msquic_km ws2_32)
 
 add_executable(echo_client
     src/client/main.cpp

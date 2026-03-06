@@ -9,6 +9,7 @@
 #include <string>
 
 #include "backends/msquic/msquic_backend.hpp"
+#include "backends/msquic_km/msquic_km_backend.hpp"
 #include "common/arg_parser.hpp"
 #include "common/quic_backend.hpp"
 #include "common/quic_factory.hpp"
@@ -41,6 +42,7 @@ int main(int argc, const char* const argv[]) {
     using namespace winquicecho;
 
     register_msquic_backend();
+    register_msquic_km_backend();
 
     arg_parser parser;
     parser.add_option("backend", 'b', "msquic", true, "Backend name.");

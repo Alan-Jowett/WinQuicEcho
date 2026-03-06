@@ -1,0 +1,37 @@
+; SPDX-License-Identifier: MIT
+; Copyright (c) 2026 WinQuicEcho contributors
+;
+; INF for the WinQuicEcho kernel-mode QUIC echo server driver.
+; Requires msquic.sys to be loaded (dependency declared in the service section).
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ProviderString%
+DriverVer   = 03/06/2026,1.0.0.0
+CatalogFile = winquicecho_km.cat
+
+[DestinationDirs]
+DefaultDestDir = 12  ; %SystemRoot%\System32\Drivers
+
+[DefaultInstall.ntamd64]
+CopyFiles = Driver_CopyFiles
+
+[Driver_CopyFiles]
+winquicecho_km.sys
+
+[DefaultInstall.ntamd64.Services]
+AddService = WinQuicEcho,,WinQuicEcho_Service
+
+[WinQuicEcho_Service]
+DisplayName    = %ServiceDesc%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\winquicecho_km.sys
+Dependencies   = msquic
+
+[Strings]
+ProviderString = "WinQuicEcho"
+ServiceDesc    = "WinQuicEcho Kernel-Mode QUIC Echo Server"
