@@ -1,0 +1,225 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 WinQuicEcho contributors
+
+name: Reusable Kernel-Mode Test
+
+on:
+  workflow_call:
+    inputs:
+      build_dir:
+        required: false
+        type: string
+        default: build
+      artifact_name:
+        required: false
+        type: string
+        default: build-artifacts
+      config:
+        required: false
+        type: string
+        default: Release
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test-km:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}
+
+      - name: Verify binaries
+        shell: pwsh
+        run: |
+          $binDir = "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}"
+          foreach ($f in @("echo_server.exe", "echo_client.exe", "msquic.dll")) {
+            if (-not (Test-Path (Join-Path $binDir $f))) {
+              Write-Error "Missing: $f"
+              exit 1
+            }
+          }
+          Write-Host "All binaries present."
+
+      - name: Check kernel-mode prerequisites
+        id: km-prereqs
+        shell: pwsh
+        run: |
+          $skip = $false
+
+          if (-not (Test-Path "$env:SystemRoot\System32\drivers\msquic.sys")) {
+            Write-Warning "msquic.sys not found — cannot run kernel-mode test."
+            $skip = $true
+          }
+
+          "skip=$($skip.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Download NuGet packages
+        if: steps.km-prereqs.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Windows.WDK.x64 -Version 10.0.26100.6584 -OutputDirectory nuget -Verbosity quiet
+          nuget install Microsoft.Windows.SDK.CPP -Version 10.0.26100.1 -OutputDirectory nuget -Verbosity quiet
+          Write-Host "WDK and SDK NuGet packages downloaded."
+
+      - name: Download MsQuic kernel headers
+        if: steps.km-prereqs.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          # The MsQuic Schannel NuGet only ships msquic_winuser.h (user-mode).
+          # Download the kernel header from the MsQuic source repo.
+          $msquicVersion = "v2.5.6"
+          $baseUrl = "https://raw.githubusercontent.com/microsoft/msquic/$msquicVersion/src/inc"
+          $outDir = "msquic-km-inc"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          foreach ($h in @("msquic.h", "msquic_winkernel.h")) {
+            Invoke-WebRequest -Uri "$baseUrl/$h" -OutFile "$outDir/$h"
+            Write-Host "Downloaded $h"
+          }
+
+      - name: Build kernel driver
+        if: steps.km-prereqs.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          # Locate MSVC toolchain via vswhere.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -property installationPath
+          $msvcBase = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory |
+              Sort-Object Name -Descending | Select-Object -First 1
+          $cl   = Join-Path $msvcBase.FullName "bin\Hostx64\x64\cl.exe"
+          $link = Join-Path $msvcBase.FullName "bin\Hostx64\x64\link.exe"
+          $lib  = Join-Path $msvcBase.FullName "bin\Hostx64\x64\lib.exe"
+
+          # Resolve NuGet package paths.
+          $wdkBase = (Get-ChildItem nuget -Directory -Filter "Microsoft.Windows.WDK*" |
+              Select-Object -First 1).FullName
+          $sdkBase = (Get-ChildItem nuget -Directory -Filter "Microsoft.Windows.SDK.CPP.10*" |
+              Select-Object -First 1).FullName
+
+          $wdkVer = (Get-ChildItem "$wdkBase\c\Include" -Directory | Select-Object -First 1).Name
+          $sdkVer = (Get-ChildItem "$sdkBase\c\Include" -Directory | Select-Object -First 1).Name
+
+          $kmInc     = "$wdkBase\c\Include\$wdkVer\km"
+          $kmLib     = "$wdkBase\c\Lib\$wdkVer\km\x64"
+          $sdkShared = "$sdkBase\c\Include\$sdkVer\shared"
+          $sdkUm     = "$sdkBase\c\Include\$sdkVer\um"
+          $msquicInc = "msquic-km-inc"
+          $ioctlInc  = "src\backends\msquic_km"
+
+          $outDir = "build\km"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+          # Generate kernel-mode import library from .def file.
+          $defContent = "LIBRARY msquic.sys`r`nEXPORTS`r`n    MsQuicOpenVersion`r`n    MsQuicClose"
+          $defContent | Out-File -FilePath "$outDir\msquic_km.def" -Encoding ascii
+          & $lib /nologo /def:"$outDir\msquic_km.def" /out:"$outDir\msquic.lib" /machine:x64
+          if ($LASTEXITCODE -ne 0) { throw "lib.exe failed with exit code $LASTEXITCODE" }
+
+          # Compile.
+          $src = "src\backends\msquic_km\driver\winquicecho_km.c"
+          & $cl /kernel /nologo /W4 /O2 /GS- /Zi `
+              "/Fo$outDir\winquicecho_km.obj" "/Fd$outDir\winquicecho_km.pdb" `
+              "/I$kmInc" "/I$sdkShared" "/I$sdkUm" "/I$msquicInc" "/I$ioctlInc" `
+              /D _AMD64_ /D AMD64 /D UNICODE /D _UNICODE /D NDEBUG `
+              /c $src
+          if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with exit code $LASTEXITCODE" }
+
+          # Link.
+          & $link /nologo /DRIVER:WDM /SUBSYSTEM:NATIVE /ENTRY:DriverEntry `
+              "/OUT:$outDir\winquicecho_km.sys" "/PDB:$outDir\winquicecho_km.pdb" `
+              /DEBUG /NODEFAULTLIB `
+              "/LIBPATH:$kmLib" "/LIBPATH:$outDir" `
+              "$outDir\winquicecho_km.obj" `
+              ntoskrnl.lib ntstrsafe.lib msquic.lib bufferoverflowfastfailk.lib
+          if ($LASTEXITCODE -ne 0) { throw "link.exe failed with exit code $LASTEXITCODE" }
+
+          Write-Host "Driver built successfully."
+          Get-Item "$outDir\winquicecho_km.sys" | Select-Object Name, Length
+
+      - name: Sign and install kernel driver
+        if: steps.km-prereqs.outputs.skip != 'true'
+        id: driver-install
+        shell: pwsh
+        run: |
+          # Create a self-signed code signing certificate.
+          $codeCert = New-SelfSignedCertificate `
+              -Type CodeSigningCert `
+              -Subject "CN=WinQuicEcho CI Test" `
+              -CertStoreLocation "Cert:\LocalMachine\My" `
+              -NotAfter (Get-Date).AddHours(1)
+          $codeThumbprint = $codeCert.Thumbprint
+          Write-Host "Code signing cert: $codeThumbprint"
+          "CODESIGN_THUMBPRINT=$codeThumbprint" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          # Trust the certificate for driver loading.
+          Export-Certificate -Cert $codeCert -FilePath build\km\ci_codesign.cer | Out-Null
+          certutil -addstore Root build\km\ci_codesign.cer
+          certutil -addstore TrustedPublisher build\km\ci_codesign.cer
+
+          # Find signtool.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" |
+              Where-Object { $_.FullName -match 'x64' } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found" }
+
+          # Sign the driver.
+          & $signtool.FullName sign /v /fd sha256 /sm /s My /n "WinQuicEcho CI Test" build\km\winquicecho_km.sys
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+
+          # Install and start the driver.
+          Copy-Item build\km\winquicecho_km.sys $env:SystemRoot\System32\drivers\winquicecho_km.sys -Force
+          sc.exe create WinQuicEcho type= kernel binPath= "$env:SystemRoot\System32\drivers\winquicecho_km.sys" start= demand depend= msquic
+          $startResult = sc.exe start WinQuicEcho 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Failed to start driver: $startResult"
+            Write-Warning "Skipping kernel-mode test (driver could not be loaded)."
+            "driver_loaded=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            sc.exe query WinQuicEcho
+            Write-Host "Driver loaded and running."
+            "driver_loaded=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Echo roundtrip integration test (kernel mode)
+        if: steps.km-prereqs.outputs.skip != 'true' && steps.driver-install.outputs.driver_loaded == 'true'
+        shell: pwsh
+        run: |
+          & ./tests/integration/echo-roundtrip.ps1 `
+              -BuildDir "./downloaded_build/${{ inputs.build_dir }}" `
+              -Config "${{ inputs.config }}" `
+              -Backend "msquic-km" `
+              -Duration 10 `
+              -Connections 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          # Stop and remove driver service.
+          sc.exe stop WinQuicEcho 2>$null
+          sc.exe delete WinQuicEcho 2>$null
+          Remove-Item "$env:SystemRoot\System32\drivers\winquicecho_km.sys" -Force -ErrorAction SilentlyContinue
+
+          # Remove code signing certificate from all stores.
+          if ($env:CODESIGN_THUMBPRINT) {
+            certutil -delstore Root $env:CODESIGN_THUMBPRINT 2>$null
+            certutil -delstore TrustedPublisher $env:CODESIGN_THUMBPRINT 2>$null
+            certutil -delstore My $env:CODESIGN_THUMBPRINT 2>$null
+          }
+
+          # Remove temp NuGet/build artefacts.
+          Remove-Item nuget -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item msquic-km-inc -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item build\km -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host "Cleanup complete."

@@ -27,7 +27,8 @@ param(
     [string]$Config = "Release",
     [int]$Port = 0,
     [int]$Duration = 5,
-    [int]$Connections = 2
+    [int]$Connections = 2,
+    [string]$Backend = "msquic"
 )
 
 $ErrorActionPreference = "Stop"
@@ -99,39 +100,52 @@ if (Test-Path $localDll) {
 # ---------------------------------------------------------------------------
 Write-Host "Generating self-signed certificate ..."
 
-$rsa = [System.Security.Cryptography.RSA]::Create(2048)
-$req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
-    "CN=localhost", $rsa,
-    [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-    [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$useLocalMachine = $Backend -eq "msquic-km"
 
-$oids = [System.Security.Cryptography.OidCollection]::new()
-[void]$oids.Add([System.Security.Cryptography.Oid]::new("1.3.6.1.5.5.7.3.1"))
-$req.CertificateExtensions.Add(
-    [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($oids, $false))
+if ($useLocalMachine) {
+    # Kernel mode uses the LocalMachine store (QUIC_CERTIFICATE_HASH_STORE_FLAG_MACHINE_STORE).
+    $persistedCert = New-SelfSignedCertificate `
+        -Type SSLServerAuthentication `
+        -Subject "CN=localhost" `
+        -CertStoreLocation "Cert:\LocalMachine\My" `
+        -NotAfter (Get-Date).AddHours(1)
+    $thumbprint = $persistedCert.Thumbprint
+    Write-Host "Certificate thumbprint: $thumbprint (imported into LocalMachine\My)"
+} else {
+    # User mode uses the CurrentUser store.
+    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+    $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+        "CN=localhost", $rsa,
+        [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+        [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
 
-$cert = $req.CreateSelfSigned(
-    [System.DateTimeOffset]::UtcNow,
-    [System.DateTimeOffset]::UtcNow.AddHours(1))
+    $oids = [System.Security.Cryptography.OidCollection]::new()
+    [void]$oids.Add([System.Security.Cryptography.Oid]::new("1.3.6.1.5.5.7.3.1"))
+    $req.CertificateExtensions.Add(
+        [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($oids, $false))
 
-$pfxBytes = $cert.Export(
-    [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, "ephemeral")
-$importFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor
-               [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet
-$persistedCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-    $pfxBytes, "ephemeral", $importFlags)
-$store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-    [System.Security.Cryptography.X509Certificates.StoreName]::My,
-    [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
-try {
-    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    $store.Add($persistedCert)
-} finally {
-    $store.Close()
+    $cert = $req.CreateSelfSigned(
+        [System.DateTimeOffset]::UtcNow,
+        [System.DateTimeOffset]::UtcNow.AddHours(1))
+
+    $pfxBytes = $cert.Export(
+        [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, "ephemeral")
+    $importFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor
+                   [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet
+    $persistedCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $pfxBytes, "ephemeral", $importFlags)
+    $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+        [System.Security.Cryptography.X509Certificates.StoreName]::My,
+        [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        $store.Add($persistedCert)
+    } finally {
+        $store.Close()
+    }
+    $thumbprint = $persistedCert.Thumbprint
+    Write-Host "Certificate thumbprint: $thumbprint (imported into CurrentUser\My)"
 }
-
-$thumbprint = $persistedCert.Thumbprint
-Write-Host "Certificate thumbprint: $thumbprint (imported into CurrentUser\My)"
 
 # Temp files (unique per-run directory to avoid collisions)
 $tempRunDir = Join-Path $env:TEMP ("echo-test-" + [System.Guid]::NewGuid().ToString())
@@ -147,7 +161,7 @@ try {
     # -----------------------------------------------------------------
     Write-Host "Starting echo_server on port $Port ..."
     $serverArgs = @(
-        "--backend", "msquic",
+        "--backend", $Backend,
         "--port", "$Port",
         "--cert-hash", $thumbprint,
         "--duration", "$($Duration + 30)",
@@ -286,23 +300,28 @@ try {
     # Remove the test certificate and private key from the store
     if ($thumbprint) {
         try {
-            $certutil = Get-Command certutil.exe -ErrorAction SilentlyContinue
-            if ($certutil) {
-                & $certutil.Path -user -delstore my $thumbprint | Out-Null
-                Write-Host "Removed test certificate and private key via certutil."
+            if ($useLocalMachine) {
+                certutil -delstore my $thumbprint | Out-Null
+                Write-Host "Removed test certificate from LocalMachine\My via certutil."
             } else {
-                $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-                    [System.Security.Cryptography.X509Certificates.StoreName]::My,
-                    [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
-                $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-                $found = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbprint }
-                if ($found) {
-                    foreach ($cert in @($found)) {
-                        $store.Remove($cert)
+                $certutil = Get-Command certutil.exe -ErrorAction SilentlyContinue
+                if ($certutil) {
+                    & $certutil.Path -user -delstore my $thumbprint | Out-Null
+                    Write-Host "Removed test certificate and private key via certutil."
+                } else {
+                    $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+                        [System.Security.Cryptography.X509Certificates.StoreName]::My,
+                        [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+                    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                    $found = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbprint }
+                    if ($found) {
+                        foreach ($cert in @($found)) {
+                            $store.Remove($cert)
+                        }
                     }
+                    $store.Close()
+                    Write-Host "Removed test certificate from store (certutil not available)."
                 }
-                $store.Close()
-                Write-Host "Removed test certificate from store (certutil not available)."
             }
         } catch {
             Write-Warning "Could not remove test certificate: $_"
