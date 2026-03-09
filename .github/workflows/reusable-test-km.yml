@@ -40,8 +40,8 @@ jobs:
       - name: Verify binaries
         shell: pwsh
         run: |
-          $binDir = "./downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}"
-          $kmDir  = "./downloaded_build/${{ inputs.build_dir }}/km"
+          $binDir = "./downloaded_build/${{ inputs.config }}"
+          $kmDir  = "./downloaded_build/km"
           foreach ($f in @(
             (Join-Path $binDir "echo_server.exe"),
             (Join-Path $binDir "echo_client.exe"),
@@ -73,7 +73,7 @@ jobs:
         id: driver-install
         shell: pwsh
         run: |
-          $driverPath = "./downloaded_build/${{ inputs.build_dir }}/km/winquicecho_km.sys"
+          $driverPath = "./downloaded_build/km/winquicecho_km.sys"
 
           # Create a self-signed code signing certificate.
           $codeCert = New-SelfSignedCertificate `
@@ -121,7 +121,7 @@ jobs:
         shell: pwsh
         run: |
           & ./tests/integration/echo-roundtrip.ps1 `
-              -BuildDir "./downloaded_build/${{ inputs.build_dir }}" `
+              -BuildDir "./downloaded_build" `
               -Config "${{ inputs.config }}" `
               -Backend "msquic-km" `
               -Duration 10 `
