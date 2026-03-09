@@ -35,7 +35,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
-          path: downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}
+          path: downloaded_build
 
       - name: Verify binaries
         shell: pwsh
