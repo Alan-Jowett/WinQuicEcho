@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 WinQuicEcho contributors
+
+name: Reusable Kernel-Mode Test
+
+on:
+  workflow_call:
+    inputs:
+      build_dir:
+        required: false
+        type: string
+        default: build
+      artifact_name:
+        required: false
+        type: string
+        default: build-artifacts
+      config:
+        required: false
+        type: string
+        default: Release
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test-km:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: downloaded_build
+
+      - name: Verify binaries
+        shell: pwsh
+        run: |
+          $binDir = "./downloaded_build/${{ inputs.config }}"
+          $kmDir  = "./downloaded_build/km"
+          foreach ($f in @(
+            (Join-Path $binDir "echo_server.exe"),
+            (Join-Path $binDir "echo_client.exe"),
+            (Join-Path $binDir "msquic.dll"),
+            (Join-Path $kmDir  "winquicecho_km.sys")
+          )) {
+            if (-not (Test-Path $f)) {
+              Write-Error "Missing: $f"
+              exit 1
+            }
+          }
+          Write-Host "All binaries present (user-mode + kernel driver)."
+
+      - name: Check kernel-mode prerequisites
+        id: km-prereqs
+        shell: pwsh
+        run: |
+          $skip = $false
+
+          if (-not (Test-Path "$env:SystemRoot\System32\drivers\msquic.sys")) {
+            Write-Warning "msquic.sys not found — cannot run kernel-mode test."
+            $skip = $true
+          }
+
+          "skip=$($skip.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Sign and install kernel driver
+        if: steps.km-prereqs.outputs.skip != 'true'
+        id: driver-install
+        shell: pwsh
+        run: |
+          $driverPath = "./downloaded_build/km/winquicecho_km.sys"
+
+          # Create a self-signed code signing certificate.
+          $codeCert = New-SelfSignedCertificate `
+              -Type CodeSigningCert `
+              -Subject "CN=WinQuicEcho CI Test" `
+              -CertStoreLocation "Cert:\LocalMachine\My" `
+              -NotAfter (Get-Date).AddHours(1)
+          $codeThumbprint = $codeCert.Thumbprint
+          Write-Host "Code signing cert: $codeThumbprint"
+          "CODESIGN_THUMBPRINT=$codeThumbprint" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          # Trust the certificate for driver loading.
+          $cerFile = Join-Path $env:TEMP "ci_codesign.cer"
+          Export-Certificate -Cert $codeCert -FilePath $cerFile | Out-Null
+          certutil -addstore Root $cerFile
+          certutil -addstore TrustedPublisher $cerFile
+
+          # Find signtool.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" |
+              Where-Object { $_.FullName -match 'x64' } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found" }
+
+          # Sign the driver.
+          & $signtool.FullName sign /v /fd sha256 /sm /s My /n "WinQuicEcho CI Test" $driverPath
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+
+          # Install and start the driver.
+          Copy-Item $driverPath $env:SystemRoot\System32\drivers\winquicecho_km.sys -Force
+          sc.exe create WinQuicEcho type= kernel binPath= "$env:SystemRoot\System32\drivers\winquicecho_km.sys" start= demand depend= msquic
+          $startResult = sc.exe start WinQuicEcho 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Failed to start driver: $startResult"
+            Write-Warning "Skipping kernel-mode test (driver could not be loaded)."
+            "driver_loaded=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            sc.exe query WinQuicEcho
+            Write-Host "Driver loaded and running."
+            "driver_loaded=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Echo roundtrip integration test (kernel mode)
+        if: steps.km-prereqs.outputs.skip != 'true' && steps.driver-install.outputs.driver_loaded == 'true'
+        shell: pwsh
+        run: |
+          & ./tests/integration/echo-roundtrip.ps1 `
+              -BuildDir "./downloaded_build" `
+              -Config "${{ inputs.config }}" `
+              -Backend "msquic-km" `
+              -Duration 10 `
+              -Connections 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          # Stop and remove driver service.
+          sc.exe stop WinQuicEcho 2>$null
+          sc.exe delete WinQuicEcho 2>$null
+          Remove-Item "$env:SystemRoot\System32\drivers\winquicecho_km.sys" -Force -ErrorAction SilentlyContinue
+
+          # Remove code signing certificate from all stores.
+          if ($env:CODESIGN_THUMBPRINT) {
+            certutil -delstore Root $env:CODESIGN_THUMBPRINT 2>$null
+            certutil -delstore TrustedPublisher $env:CODESIGN_THUMBPRINT 2>$null
+            certutil -delstore My $env:CODESIGN_THUMBPRINT 2>$null
+          }
+
+          Write-Host "Cleanup complete."

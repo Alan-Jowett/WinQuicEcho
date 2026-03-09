@@ -29,3 +29,11 @@ jobs:
       build_dir: build
       config: Release
       artifact_name: build-artifacts
+
+  test-km:
+    needs: build
+    uses: ./.github/workflows/reusable-test-km.yml
+    with:
+      build_dir: build
+      config: Release
+      artifact_name: build-artifacts

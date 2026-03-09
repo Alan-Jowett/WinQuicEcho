@@ -5,9 +5,10 @@
 
 Windows QUIC echo benchmark in the style of `WinUDPShardedEcho`, with a pluggable backend interface so different QUIC implementations can be compared under the same client/server contract.
 
-## Current backend
+## Backends
 
-- `msquic` (default)
+- `msquic` (default) — user-mode MsQuic (msquic.dll)
+- `msquic-km` — kernel-mode MsQuic (msquic.sys), the same API surface used by http.sys and SMB server
 
 The architecture is intentionally backend-neutral, so new QUIC libraries can be added by implementing `quic_backend` and registering it in the factory.
 
@@ -59,6 +60,63 @@ Optional:
 - `--stats-file <path>`: write final JSON stats
 - `--alpn <name>`: ALPN (default `echo`)
 - `--verbose`
+
+## Kernel-mode backend (`msquic-km`)
+
+The `msquic-km` backend runs the server-side echo logic inside a WDM kernel
+driver (`winquicecho_km.sys`) that calls msquic.sys directly — the same path
+http.sys and SMB server use.  The user-mode `echo_server.exe` communicates
+with the driver via IOCTLs for start/stop/stats.
+
+### Prerequisites
+
+1. **Windows Driver Kit (WDK)** for Visual Studio 2022.
+2. **MsQuic kernel-mode artefacts** — headers and import library.  Obtain by:
+   - Building MsQuic from source with kernel mode:
+     ```powershell
+     .\scripts\build.ps1 -Config Release -Tls schannel -Arch x64 -Kernel
+     ```
+   - Or extracting from the `Microsoft.Native.Quic.MsQuic.Schannel` NuGet package.
+3. **msquic.sys** installed on the target machine (Windows Server 2022+ / Windows 11+
+   ship with an inbox version, or install from MsQuic releases).
+4. **Test signing** enabled for development:
+   ```powershell
+   bcdedit /set testsigning on
+   # Reboot required
+   ```
+
+### Building the kernel driver
+
+```powershell
+.\scripts\build-km-driver.ps1 -MsQuicKernelDir <path-to-msquic-kernel-output>
+```
+
+This produces `build\km\winquicecho_km.sys`.
+
+### Installing the driver
+
+```powershell
+# Requires Administrator
+.\scripts\install-km-driver.ps1 -SysFile build\km\winquicecho_km.sys
+
+# To uninstall:
+.\scripts\install-km-driver.ps1 -Uninstall
+```
+
+### Running with the kernel backend
+
+The certificate must be in the **Local Machine** certificate store (the kernel
+driver uses `QUIC_CERTIFICATE_HASH_STORE_FLAG_MACHINE_STORE`):
+
+```powershell
+.\echo_server --backend msquic-km --port 5001 --cert-hash <THUMBPRINT>
+```
+
+The client remains user-mode (`--backend msquic`); only the server side runs
+in kernel mode.
+
+> **Note:** File-based and PFX certificate credentials are not supported in
+> kernel mode.  Use `--cert-hash` with a Schannel thumbprint.
 
 ## Plugging in additional QUIC libraries
 

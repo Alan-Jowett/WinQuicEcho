@@ -37,8 +37,79 @@ jobs:
       - name: Build
         run: cmake --build ${{ inputs.build_dir }} --config ${{ inputs.config }} --parallel
 
+      - name: Download WDK NuGet packages
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Windows.WDK.x64 -Version 10.0.26100.6584 -OutputDirectory nuget -Verbosity quiet
+          nuget install Microsoft.Windows.SDK.CPP -Version 10.0.26100.1 -OutputDirectory nuget -Verbosity quiet
+          Write-Host "WDK and SDK NuGet packages downloaded."
+
+      - name: Build kernel driver
+        shell: pwsh
+        run: |
+          # Locate MSVC toolchain via vswhere.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -property installationPath
+          $msvcBase = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory |
+              Sort-Object Name -Descending | Select-Object -First 1
+          $cl   = Join-Path $msvcBase.FullName "bin\Hostx64\x64\cl.exe"
+          $link = Join-Path $msvcBase.FullName "bin\Hostx64\x64\link.exe"
+          $lib  = Join-Path $msvcBase.FullName "bin\Hostx64\x64\lib.exe"
+          $crtInc = Join-Path $msvcBase.FullName "include"
+
+          # Resolve NuGet package paths.
+          $wdkBase = (Get-ChildItem nuget -Directory -Filter "Microsoft.Windows.WDK*" |
+              Select-Object -First 1).FullName
+          $sdkBase = (Get-ChildItem nuget -Directory -Filter "Microsoft.Windows.SDK.CPP.10*" |
+              Select-Object -First 1).FullName
+
+          $wdkVer = (Get-ChildItem "$wdkBase\c\Include" -Directory | Select-Object -First 1).Name
+          $sdkVer = (Get-ChildItem "$sdkBase\c\Include" -Directory | Select-Object -First 1).Name
+
+          $kmInc     = "$wdkBase\c\Include\$wdkVer\km"
+          $kmLib     = "$wdkBase\c\Lib\$wdkVer\km\x64"
+          $sdkShared = "$sdkBase\c\Include\$sdkVer\shared"
+          $sdkUm     = "$sdkBase\c\Include\$sdkVer\um"
+          $sdkUcrt   = "$sdkBase\c\Include\$sdkVer\ucrt"
+
+          # MsQuic kernel headers come from FetchContent (already downloaded by CMake).
+          $msquicInc = "${{ inputs.build_dir }}\_deps\msquic-src\src\inc"
+          $ioctlInc  = "src\backends\msquic_km"
+
+          $outDir = "${{ inputs.build_dir }}\km"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+          # Generate kernel-mode import library from .def file.
+          $defContent = "LIBRARY msquic.sys`r`nEXPORTS`r`n    MsQuicOpenVersion`r`n    MsQuicClose"
+          $defContent | Out-File -FilePath "$outDir\msquic_km.def" -Encoding ascii
+          & $lib /nologo /def:"$outDir\msquic_km.def" /out:"$outDir\msquic.lib" /machine:x64
+          if ($LASTEXITCODE -ne 0) { throw "lib.exe failed with exit code $LASTEXITCODE" }
+
+          # Compile.
+          $src = "src\backends\msquic_km\driver\winquicecho_km.c"
+          & $cl /kernel /nologo /W4 /O2 /GS- /Zi `
+              "/Fo$outDir\winquicecho_km.obj" "/Fd$outDir\winquicecho_km.pdb" `
+              "/I$crtInc" "/I$kmInc" "/I$sdkShared" "/I$sdkUm" "/I$sdkUcrt" "/I$msquicInc" "/I$ioctlInc" `
+              /D _AMD64_ /D AMD64 /D UNICODE /D _UNICODE /D NDEBUG `
+              /c $src
+          if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with exit code $LASTEXITCODE" }
+
+          # Link.
+          & $link /nologo /DRIVER:WDM /SUBSYSTEM:NATIVE /ENTRY:DriverEntry `
+              "/OUT:$outDir\winquicecho_km.sys" "/PDB:$outDir\winquicecho_km.pdb" `
+              /DEBUG /NODEFAULTLIB `
+              "/LIBPATH:$kmLib" "/LIBPATH:$outDir" `
+              "$outDir\winquicecho_km.obj" `
+              ntoskrnl.lib ntstrsafe.lib msquic.lib bufferoverflowfastfailk.lib
+          if ($LASTEXITCODE -ne 0) { throw "link.exe failed with exit code $LASTEXITCODE" }
+
+          Write-Host "Kernel driver built successfully."
+          Get-Item "$outDir\winquicecho_km.sys" | Select-Object Name, Length
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
-          path: ${{ inputs.build_dir }}/${{ inputs.config }}
+          path: |
+            ${{ inputs.build_dir }}/${{ inputs.config }}
+            ${{ inputs.build_dir }}/km/winquicecho_km.sys
