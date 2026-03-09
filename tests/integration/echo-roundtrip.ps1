@@ -103,6 +103,13 @@ Write-Host "Generating self-signed certificate ..."
 $useLocalMachine = $Backend -eq "msquic-km"
 
 if ($useLocalMachine) {
+    # Kernel mode requires LocalMachine cert store — needs elevation.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw "The msquic-km backend requires administrator privileges for LocalMachine cert store access."
+    }
+
     # Kernel mode uses the LocalMachine store (QUIC_CERTIFICATE_HASH_STORE_FLAG_MACHINE_STORE).
     $persistedCert = New-SelfSignedCertificate `
         -Type SSLServerAuthentication `

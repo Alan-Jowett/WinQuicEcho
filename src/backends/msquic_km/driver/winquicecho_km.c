@@ -145,12 +145,25 @@ ServerConnectionCallback(
     CONN_CTX* ConnCtx = (CONN_CTX*)Context;
     ECHO_SERVER_CTX* Server = ConnCtx->Server;
 
-    // Bail out early if the server is shutting down.
+    // Handle cleanup events even when shutting down to avoid leaks.
     if (!InterlockedCompareExchange(&Server->Running, 0, 0)) {
-        if (Event->Type == QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE) {
+        switch (Event->Type) {
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             InterlockedDecrement64(&Server->ActiveConnections);
             Server->MsQuic->ConnectionClose(Connection);
             FreeConnCtx(ConnCtx);
+            break;
+        case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED: {
+            DGRAM_SEND_CTX* SendCtx = (DGRAM_SEND_CTX*)
+                Event->DATAGRAM_SEND_STATE_CHANGED.ClientContext;
+            if (SendCtx != NULL &&
+                IsSendStateFinal(Event->DATAGRAM_SEND_STATE_CHANGED.State)) {
+                FreeSendCtx(SendCtx);
+            }
+            break;
+        }
+        default:
+            break;
         }
         return QUIC_STATUS_SUCCESS;
     }
@@ -246,14 +259,19 @@ ServerListenerCallback(
         (void*)ServerConnectionCallback,
         ConnCtx);
 
+    // Track the connection before calling ConnectionSetConfiguration so that
+    // if it fails, the SHUTDOWN_COMPLETE callback (which will still fire) can
+    // decrement the counter and free ConnCtx.
+    InterlockedIncrement64(&Server->ActiveConnections);
+
     QUIC_STATUS Status = Server->MsQuic->ConnectionSetConfiguration(
         Event->NEW_CONNECTION.Connection, Server->Configuration);
     if (QUIC_FAILED(Status)) {
-        FreeConnCtx(ConnCtx);
+        // MsQuic will reject the connection and eventually deliver
+        // SHUTDOWN_COMPLETE to our callback, which frees ConnCtx.
         return Status;
     }
 
-    InterlockedIncrement64(&Server->ActiveConnections);
     return QUIC_STATUS_SUCCESS;
 }
 
@@ -427,7 +445,15 @@ StopEchoServer(void)
         g_Server.Listener = NULL;
     }
 
-    // Wait briefly for active connections to drain (best-effort).
+    // Shut down the registration to trigger graceful close of all connections.
+    // This ensures SHUTDOWN_COMPLETE fires for every connection so callbacks
+    // finish and ConnCtx/SendCtx are freed before we close the API table.
+    if (g_Server.Registration != NULL) {
+        g_Server.MsQuic->RegistrationShutdown(
+            g_Server.Registration, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
+    }
+
+    // Wait for active connections to drain (RegistrationShutdown triggers it).
     for (int i = 0; i < 200; ++i) {
         if (InterlockedCompareExchange64(&g_Server.ActiveConnections, 0, 0) == 0) {
             break;
@@ -552,10 +578,11 @@ DriverEntry(
 
     NTSTATUS Status;
     UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(WINQUICECHO_DEVICE_NAME);
-    BOOLEAN SymlinkCreated = FALSE;
 
     ExInitializeFastMutex(&g_Server.Lock);
 
+    // FILE_DEVICE_SECURE_OPEN applies the device's security descriptor to
+    // every open. The default ACL restricts access to SYSTEM and Administrators.
     Status = IoCreateDevice(
         DriverObject, 0, &DeviceName, FILE_DEVICE_UNKNOWN,
         FILE_DEVICE_SECURE_OPEN, FALSE, &g_DeviceObject);
@@ -569,7 +596,6 @@ DriverEntry(
         g_DeviceObject = NULL;
         return Status;
     }
-    SymlinkCreated = TRUE;
 
     DriverObject->MajorFunction[IRP_MJ_CREATE]         = DeviceCreateClose;
     DriverObject->MajorFunction[IRP_MJ_CLOSE]          = DeviceCreateClose;

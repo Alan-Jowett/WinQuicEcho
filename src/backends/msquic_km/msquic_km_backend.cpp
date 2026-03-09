@@ -8,10 +8,12 @@
 #include "backends/msquic_km/msquic_km_backend.hpp"
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -81,13 +83,18 @@ class km_device {
 
     void stop_server() const {
         DWORD bytes_returned = 0;
-        DeviceIoControl(
+        BOOL ok = DeviceIoControl(
             handle_,
             IOCTL_WINQUICECHO_STOP_SERVER,
             nullptr, 0,
             nullptr, 0,
             &bytes_returned,
             nullptr);
+        if (!ok) {
+            const DWORD err = GetLastError();
+            std::cerr << "IOCTL_WINQUICECHO_STOP_SERVER failed (error="
+                      << err << ")\n";
+        }
     }
 
     WINQUICECHO_SERVER_STATS get_stats() const {
@@ -105,6 +112,12 @@ class km_device {
             throw std::runtime_error(
                 "IOCTL_WINQUICECHO_GET_STATS failed (error=" +
                 std::to_string(err) + ")");
+        }
+        if (bytes_returned != sizeof(stats)) {
+            throw std::runtime_error(
+                "IOCTL_WINQUICECHO_GET_STATS returned " +
+                std::to_string(bytes_returned) + " bytes, expected " +
+                std::to_string(sizeof(stats)));
         }
         return stats;
     }
@@ -145,9 +158,10 @@ class msquic_km_backend final : public quic_backend {
 
     int run_server(const server_options& options,
                    const std::atomic<bool>& shutdown_requested) override {
-        try {
-            km_device device;
+        km_device device;
+        bool server_started = false;
 
+        try {
             WINQUICECHO_SERVER_CONFIG config{};
             config.Port = options.port;
             config.Verbose = options.verbose ? TRUE : FALSE;
@@ -174,6 +188,7 @@ class msquic_km_backend final : public quic_backend {
             config.CertStore[sizeof(config.CertStore) - 1] = '\0';
 
             device.start_server(config);
+            server_started = true;
 
             std::cout << "Server backend: msquic-km (kernel mode)\n" << std::flush;
             std::cout << "Listening on UDP port " << options.port
@@ -210,6 +225,7 @@ class msquic_km_backend final : public quic_backend {
             }
 
             device.stop_server();
+            server_started = false;
 
             auto final_stats = device.get_stats();
             std::cout << "Final echoed requests: " << final_stats.RequestsEchoed << "\n";
@@ -217,6 +233,9 @@ class msquic_km_backend final : public quic_backend {
 
         } catch (const std::exception& ex) {
             std::cerr << "msquic-km server error: " << ex.what() << "\n";
+            if (server_started) {
+                device.stop_server();
+            }
             return 1;
         }
     }
