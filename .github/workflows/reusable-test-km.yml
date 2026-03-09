@@ -97,6 +97,7 @@ jobs:
           $cl   = Join-Path $msvcBase.FullName "bin\Hostx64\x64\cl.exe"
           $link = Join-Path $msvcBase.FullName "bin\Hostx64\x64\link.exe"
           $lib  = Join-Path $msvcBase.FullName "bin\Hostx64\x64\lib.exe"
+          $crtInc = Join-Path $msvcBase.FullName "include"
 
           # Resolve NuGet package paths.
           $wdkBase = (Get-ChildItem nuget -Directory -Filter "Microsoft.Windows.WDK*" |
@@ -127,7 +128,7 @@ jobs:
           $src = "src\backends\msquic_km\driver\winquicecho_km.c"
           & $cl /kernel /nologo /W4 /O2 /GS- /Zi `
               "/Fo$outDir\winquicecho_km.obj" "/Fd$outDir\winquicecho_km.pdb" `
-              "/I$kmInc" "/I$sdkShared" "/I$sdkUm" "/I$msquicInc" "/I$ioctlInc" `
+              "/I$crtInc" "/I$kmInc" "/I$sdkShared" "/I$sdkUm" "/I$msquicInc" "/I$ioctlInc" `
               /D _AMD64_ /D AMD64 /D UNICODE /D _UNICODE /D NDEBUG `
               /c $src
           if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with exit code $LASTEXITCODE" }
