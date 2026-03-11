@@ -128,7 +128,7 @@ struct datagram_send_context {
 
     void init_buffer() {
         quic_buffer.Length = static_cast<uint32_t>(payload.size());
-        quic_buffer.Buffer = payload.data();
+        quic_buffer.Buffer = payload.empty() ? nullptr : payload.data();
     }
 };
 
@@ -371,11 +371,13 @@ QUIC_STATUS QUIC_API client_connection_callback(HQUIC, void* context, QUIC_CONNE
                 std::memcpy(&sequence, received->Buffer, sizeof(uint64_t));
             }
 
+            const uint64_t recv_ts = now_ns();
+
             {
                 std::lock_guard<std::mutex> lock(connection_ctx->mutex);
                 auto it = connection_ctx->pending_requests.find(sequence);
                 if (it != connection_ctx->pending_requests.end()) {
-                    connection_ctx->state->latency.add_sample(now_ns() - it->second);
+                    connection_ctx->state->latency.add_sample(recv_ts - it->second);
                     connection_ctx->state->requests_completed.fetch_add(1, std::memory_order_relaxed);
                     connection_ctx->pending_requests.erase(it);
                     connection_ctx->cv.notify_one();
@@ -657,6 +659,7 @@ class msquic_backend final : public quic_backend {
                     connection_ctx->api = api;
                     connection_ctx->state = &state;
                     connection_ctx->max_outstanding = options.outstanding;
+                    connection_ctx->pending_requests.reserve(connection_ctx->max_outstanding);
 
                     HQUIC connection = nullptr;
                     QUIC_STATUS status =
@@ -722,6 +725,9 @@ class msquic_backend final : public quic_backend {
                     uint64_t sequence = static_cast<uint64_t>(worker) << 40;
                     const uint32_t payload_size = std::max<uint32_t>(16, options.payload_size);
 
+                    // Timeout for considering a pending request as lost (2 seconds).
+                    constexpr uint64_t stale_timeout_ns = 2'000'000'000ULL;
+
                     while (!stop_signal.load(std::memory_order_acquire)) {
                         uint32_t effective_payload_size = payload_size;
 
@@ -735,7 +741,19 @@ class msquic_backend final : public quic_backend {
                                                connection_ctx->shutdown_complete ||
                                                connection_ctx->failed;
                                     })) {
-                                continue;  // Timeout — re-check stop_signal.
+                                // Timeout — evict stale pending entries so a lost
+                                // datagram doesn't permanently stall the connection.
+                                const uint64_t cutoff = now_ns() - stale_timeout_ns;
+                                for (auto it = connection_ctx->pending_requests.begin();
+                                     it != connection_ctx->pending_requests.end();) {
+                                    if (it->second < cutoff) {
+                                        it = connection_ctx->pending_requests.erase(it);
+                                        state.errors.fetch_add(1, std::memory_order_relaxed);
+                                    } else {
+                                        ++it;
+                                    }
+                                }
+                                continue;
                             }
                             if (connection_ctx->shutdown_complete || connection_ctx->failed) {
                                 break;
