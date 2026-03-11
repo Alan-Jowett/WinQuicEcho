@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -123,6 +124,12 @@ class winsock_scope {
 
 struct datagram_send_context {
     std::vector<uint8_t> payload;
+    QUIC_BUFFER quic_buffer;  // Must outlive DatagramSend (MsQuic stores the pointer).
+
+    void init_buffer() {
+        quic_buffer.Length = static_cast<uint32_t>(payload.size());
+        quic_buffer.Buffer = payload.empty() ? nullptr : payload.data();
+    }
 };
 
 struct server_state {
@@ -171,12 +178,10 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
             if (received->Length > 0) {
                 std::memcpy(send_ctx->payload.data(), received->Buffer, received->Length);
             }
+            send_ctx->init_buffer();
 
-            QUIC_BUFFER outgoing{};
-            outgoing.Length = static_cast<uint32_t>(send_ctx->payload.size());
-            outgoing.Buffer = send_ctx->payload.empty() ? nullptr : send_ctx->payload.data();
-            QUIC_STATUS status = state->api->DatagramSend(connection, &outgoing, 1, QUIC_SEND_FLAG_NONE,
-                                                          send_ctx);
+            QUIC_STATUS status = state->api->DatagramSend(
+                connection, &send_ctx->quic_buffer, 1, QUIC_SEND_FLAG_NONE, send_ctx);
             if (QUIC_FAILED(status)) {
                 if (state->verbose) {
                     std::cerr << "[server] DatagramSend failed: " << status_to_string(status) << "\n";
@@ -288,18 +293,18 @@ struct client_state {
 struct client_connection_context {
     const QUIC_API_TABLE* api{nullptr};
     client_state* state{nullptr};
+    uint32_t max_outstanding{1};
 
     std::mutex mutex;
     std::condition_variable cv;
     bool connected{false};
     bool failed{false};
     bool shutdown_complete{false};
-    bool waiting_for_reply{false};
-    bool reply_received{false};
     bool datagram_send_enabled{false};
     uint16_t max_datagram_send_length{0};
-    uint64_t expected_sequence{0};
-    uint64_t send_timestamp_ns{0};
+
+    // Maps sequence number → send timestamp (ns) for in-flight requests.
+    std::unordered_map<uint64_t, uint64_t> pending_requests;
 };
 
 void fill_payload(std::vector<uint8_t>& payload, uint64_t sequence_number) {
@@ -366,14 +371,15 @@ QUIC_STATUS QUIC_API client_connection_callback(HQUIC, void* context, QUIC_CONNE
                 std::memcpy(&sequence, received->Buffer, sizeof(uint64_t));
             }
 
+            const uint64_t recv_ts = now_ns();
+
             {
                 std::lock_guard<std::mutex> lock(connection_ctx->mutex);
-                if (connection_ctx->waiting_for_reply &&
-                    sequence == connection_ctx->expected_sequence) {
-                    connection_ctx->waiting_for_reply = false;
-                    connection_ctx->reply_received = true;
-                    connection_ctx->state->latency.add_sample(now_ns() -
-                                                              connection_ctx->send_timestamp_ns);
+                auto it = connection_ctx->pending_requests.find(sequence);
+                if (it != connection_ctx->pending_requests.end()) {
+                    connection_ctx->state->latency.add_sample(recv_ts - it->second);
+                    connection_ctx->state->requests_completed.fetch_add(1, std::memory_order_relaxed);
+                    connection_ctx->pending_requests.erase(it);
                     connection_ctx->cv.notify_one();
                 }
             }
@@ -416,7 +422,7 @@ QUIC_STATUS QUIC_API client_connection_callback(HQUIC, void* context, QUIC_CONNE
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
             std::lock_guard<std::mutex> lock(connection_ctx->mutex);
             connection_ctx->shutdown_complete = true;
-            connection_ctx->waiting_for_reply = false;
+            connection_ctx->pending_requests.clear();
             connection_ctx->cv.notify_one();
             return QUIC_STATUS_SUCCESS;
         }
@@ -652,6 +658,8 @@ class msquic_backend final : public quic_backend {
                     auto* connection_ctx = new client_connection_context();
                     connection_ctx->api = api;
                     connection_ctx->state = &state;
+                    connection_ctx->max_outstanding = options.outstanding;
+                    connection_ctx->pending_requests.reserve(connection_ctx->max_outstanding);
 
                     HQUIC connection = nullptr;
                     QUIC_STATUS status =
@@ -717,34 +725,59 @@ class msquic_backend final : public quic_backend {
                     uint64_t sequence = static_cast<uint64_t>(worker) << 40;
                     const uint32_t payload_size = std::max<uint32_t>(16, options.payload_size);
 
+                    // Timeout for considering a pending request as lost (2 seconds).
+                    constexpr uint64_t stale_timeout_ns = 2'000'000'000ULL;
+
                     while (!stop_signal.load(std::memory_order_acquire)) {
-                        const uint64_t request_sequence = ++sequence;
-                        auto* send_ctx = new datagram_send_context();
                         uint32_t effective_payload_size = payload_size;
+
+                        // Wait for an available slot (pending < max_outstanding).
                         {
-                            std::lock_guard<std::mutex> lock(connection_ctx->mutex);
+                            std::unique_lock<std::mutex> lock(connection_ctx->mutex);
+                            if (!connection_ctx->cv.wait_for(
+                                    lock, std::chrono::milliseconds(100), [&] {
+                                        return connection_ctx->pending_requests.size() <
+                                                   connection_ctx->max_outstanding ||
+                                               connection_ctx->shutdown_complete ||
+                                               connection_ctx->failed;
+                                    })) {
+                                // Timeout — evict stale pending entries so a lost
+                                // datagram doesn't permanently stall the connection.
+                                const uint64_t cutoff = now_ns() - stale_timeout_ns;
+                                for (auto it = connection_ctx->pending_requests.begin();
+                                     it != connection_ctx->pending_requests.end();) {
+                                    if (it->second < cutoff) {
+                                        it = connection_ctx->pending_requests.erase(it);
+                                        state.errors.fetch_add(1, std::memory_order_relaxed);
+                                    } else {
+                                        ++it;
+                                    }
+                                }
+                                continue;
+                            }
+                            if (connection_ctx->shutdown_complete || connection_ctx->failed) {
+                                break;
+                            }
                             if (connection_ctx->max_datagram_send_length > 0) {
                                 effective_payload_size =
                                     std::min<uint32_t>(effective_payload_size,
                                                        connection_ctx->max_datagram_send_length);
                             }
                         }
+
+                        const uint64_t request_sequence = ++sequence;
+                        auto* send_ctx = new datagram_send_context();
                         send_ctx->payload.resize(std::max<uint32_t>(16, effective_payload_size));
                         fill_payload(send_ctx->payload, request_sequence);
+                        send_ctx->init_buffer();
 
-                        QUIC_BUFFER outgoing{};
-                        outgoing.Length = static_cast<uint32_t>(send_ctx->payload.size());
-                        outgoing.Buffer = send_ctx->payload.data();
-
+                        const uint64_t send_ts = now_ns();
                         {
                             std::lock_guard<std::mutex> lock(connection_ctx->mutex);
-                            connection_ctx->waiting_for_reply = true;
-                            connection_ctx->reply_received = false;
-                            connection_ctx->expected_sequence = request_sequence;
-                            connection_ctx->send_timestamp_ns = now_ns();
+                            connection_ctx->pending_requests[request_sequence] = send_ts;
                         }
 
-                        status = api->DatagramSend(connection, &outgoing, 1, QUIC_SEND_FLAG_NONE, send_ctx);
+                        status = api->DatagramSend(connection, &send_ctx->quic_buffer, 1, QUIC_SEND_FLAG_NONE, send_ctx);
                         if (QUIC_FAILED(status)) {
                             if (state.verbose) {
                                 std::cerr << "[client] DatagramSend failed: " << status_to_string(status)
@@ -753,33 +786,14 @@ class msquic_backend final : public quic_backend {
                             delete send_ctx;
                             {
                                 std::lock_guard<std::mutex> lock(connection_ctx->mutex);
-                                connection_ctx->waiting_for_reply = false;
+                                connection_ctx->pending_requests.erase(request_sequence);
                             }
                             state.errors.fetch_add(1, std::memory_order_relaxed);
                             continue;
                         }
 
                         state.requests_sent.fetch_add(1, std::memory_order_relaxed);
-                        state.bytes_sent.fetch_add(outgoing.Length, std::memory_order_relaxed);
-
-                        bool replied = false;
-                        {
-                            std::unique_lock<std::mutex> lock(connection_ctx->mutex);
-                            replied = connection_ctx->cv.wait_for(
-                                lock, std::chrono::milliseconds(1000),
-                                [&] { return connection_ctx->reply_received || connection_ctx->shutdown_complete; });
-                            if (connection_ctx->reply_received) {
-                                replied = true;
-                                connection_ctx->reply_received = false;
-                            }
-                            connection_ctx->waiting_for_reply = false;
-                        }
-
-                        if (replied) {
-                            state.requests_completed.fetch_add(1, std::memory_order_relaxed);
-                        } else {
-                            state.errors.fetch_add(1, std::memory_order_relaxed);
-                        }
+                        state.bytes_sent.fetch_add(send_ctx->quic_buffer.Length, std::memory_order_relaxed);
                     }
 
                     api->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);

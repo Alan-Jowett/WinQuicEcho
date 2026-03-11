@@ -38,6 +38,7 @@ struct client_options {
     uint32_t duration_seconds{10};
     uint32_t payload_size{64};
     uint32_t connections{1};
+    uint32_t outstanding{1};
     bool insecure{true};
     bool verbose{false};
     std::string stats_file;
