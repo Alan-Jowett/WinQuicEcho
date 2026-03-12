@@ -666,11 +666,22 @@ class msquic_backend final : public quic_backend {
                 }
             }
 
+            std::cout << "Final echoed requests: "
+                      << state.requests_echoed.load(std::memory_order_relaxed) << "\n"
+                      << std::flush;
+
+            // MsQuic RegistrationClose can block indefinitely if internal
+            // resources aren't fully released.  Start a watchdog that forces
+            // process exit if RAII cleanup takes too long.
+            std::thread watchdog([]() {
+                std::this_thread::sleep_for(std::chrono::seconds(10));
+                std::cerr << "Watchdog: forcing exit after cleanup timeout\n";
+                std::_Exit(0);
+            });
+            watchdog.detach();
+
             // RAII guards close listener, configuration, and registration in
             // reverse order when leaving this scope.
-
-            std::cout << "Final echoed requests: "
-                      << state.requests_echoed.load(std::memory_order_relaxed) << "\n";
             return 0;
         } catch (const std::exception& ex) {
             std::cerr << "MsQuic server error: " << ex.what() << "\n";
