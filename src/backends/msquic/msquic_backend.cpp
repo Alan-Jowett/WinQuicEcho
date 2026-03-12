@@ -214,6 +214,7 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
             // TODO: consider a pool allocator for datagram_send_context to reduce
             // per-datagram heap allocation overhead in the hot path.
             auto* send_ctx = new datagram_send_context();
+            send_ctx->payload.resize(received->Length);
             if (received->Length > 0) {
                 std::memcpy(send_ctx->payload.data(), received->Buffer, received->Length);
             }
@@ -259,12 +260,15 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
             if (state->verbose) {
                 std::cerr << "[server] connection shutdown complete\n";
             }
+            bool should_close = false;
             {
                 std::lock_guard<std::mutex> lock(state->connection_mutex);
-                state->live_connections.erase(connection);
+                should_close = state->live_connections.erase(connection) > 0;
             }
-            state->active_connections.fetch_sub(1, std::memory_order_relaxed);
-            state->api->ConnectionClose(connection);
+            if (should_close) {
+                state->active_connections.fetch_sub(1, std::memory_order_relaxed);
+                state->api->ConnectionClose(connection);
+            }
             delete connection_ctx;
             return QUIC_STATUS_SUCCESS;
         }
@@ -646,6 +650,20 @@ class msquic_backend final : public quic_backend {
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            }
+
+            // Force-close any connections that didn't complete shutdown in time.
+            // Without this, RAII handle cleanup (RegistrationClose) can block.
+            {
+                std::vector<HQUIC> orphaned;
+                {
+                    std::lock_guard<std::mutex> lock(state.connection_mutex);
+                    orphaned.assign(state.live_connections.begin(), state.live_connections.end());
+                    state.live_connections.clear();
+                }
+                for (HQUIC connection : orphaned) {
+                    api->ConnectionClose(connection);
+                }
             }
 
             // RAII guards close listener, configuration, and registration in
