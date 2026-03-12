@@ -7,6 +7,12 @@
 #include <string>
 
 #include "backends/msquic/msquic_backend.hpp"
+#ifdef WINQUICECHO_HAS_NGTCP2
+#include "backends/ngtcp2/ngtcp2_backend.hpp"
+#endif
+#ifdef WINQUICECHO_HAS_PICOQUIC
+#include "backends/picoquic/picoquic_backend.hpp"
+#endif
 #include "common/arg_parser.hpp"
 #include "common/parse_utils.hpp"
 #include "common/quic_backend.hpp"
@@ -16,6 +22,12 @@ int main(int argc, const char* const argv[]) {
     using namespace winquicecho;
 
     register_msquic_backend();
+#ifdef WINQUICECHO_HAS_NGTCP2
+    register_ngtcp2_backend();
+#endif
+#ifdef WINQUICECHO_HAS_PICOQUIC
+    register_picoquic_backend();
+#endif
 
     arg_parser parser;
     parser.add_option("backend", 'b', "msquic", true, "Backend name.");
