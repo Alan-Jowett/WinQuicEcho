@@ -13,6 +13,9 @@ if (NOT WIN32)
     message(FATAL_ERROR "WinQuicEcho is currently supported on Windows only.")
 endif()
 
+# Use static CRT (/MT) so executables don't depend on VC++ redistributable DLLs.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # ---------------------------------------------------------------------------
 # MsQuic dependency (built from source)
 # ---------------------------------------------------------------------------
