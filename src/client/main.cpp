@@ -2,35 +2,15 @@
 // Copyright (c) 2026 WinQuicEcho contributors
 
 #include <algorithm>
-#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 
 #include "backends/msquic/msquic_backend.hpp"
 #include "common/arg_parser.hpp"
+#include "common/parse_utils.hpp"
 #include "common/quic_backend.hpp"
 #include "common/quic_factory.hpp"
-
-namespace {
-
-uint16_t parse_port(const std::string& text) {
-    const long value = std::strtol(text.c_str(), nullptr, 10);
-    if (value <= 0 || value > 65535) {
-        throw std::invalid_argument("Invalid port number.");
-    }
-    return static_cast<uint16_t>(value);
-}
-
-uint32_t parse_u32(const std::string& text, const char* field) {
-    const long value = std::strtol(text.c_str(), nullptr, 10);
-    if (value < 0) {
-        throw std::invalid_argument(std::string("Invalid value for ") + field);
-    }
-    return static_cast<uint32_t>(value);
-}
-
-}  // namespace
 
 int main(int argc, const char* const argv[]) {
     using namespace winquicecho;
@@ -63,6 +43,8 @@ int main(int argc, const char* const argv[]) {
 
     client_options options;
     try {
+        using winquicecho::parse_port;
+        using winquicecho::parse_u32;
         options.backend = parser.get("backend");
         options.server = parser.get("server");
         options.port = parse_port(parser.get("port"));

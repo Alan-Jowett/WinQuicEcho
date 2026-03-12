@@ -3,7 +3,6 @@
 
 #include <atomic>
 #include <csignal>
-#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -11,6 +10,7 @@
 #include "backends/msquic/msquic_backend.hpp"
 #include "backends/msquic_km/msquic_km_backend.hpp"
 #include "common/arg_parser.hpp"
+#include "common/parse_utils.hpp"
 #include "common/quic_backend.hpp"
 #include "common/quic_factory.hpp"
 
@@ -19,22 +19,6 @@ namespace {
 std::atomic<bool> g_shutdown{false};
 
 void handle_signal(int) { g_shutdown.store(true, std::memory_order_relaxed); }
-
-uint16_t parse_port(const std::string& text) {
-    const long value = std::strtol(text.c_str(), nullptr, 10);
-    if (value <= 0 || value > 65535) {
-        throw std::invalid_argument("Invalid port number.");
-    }
-    return static_cast<uint16_t>(value);
-}
-
-uint32_t parse_u32(const std::string& text, const char* field) {
-    const long value = std::strtol(text.c_str(), nullptr, 10);
-    if (value < 0) {
-        throw std::invalid_argument(std::string("Invalid value for ") + field);
-    }
-    return static_cast<uint32_t>(value);
-}
 
 }  // namespace
 
@@ -71,6 +55,8 @@ int main(int argc, const char* const argv[]) {
 
     server_options options;
     try {
+        using winquicecho::parse_port;
+        using winquicecho::parse_u32;
         options.backend = parser.get("backend");
         options.port = parse_port(parser.get("port"));
         options.alpn = parser.get("alpn");
