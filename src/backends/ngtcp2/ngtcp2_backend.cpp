@@ -256,8 +256,12 @@ static int server_get_new_cid_cb(ngtcp2_conn*, ngtcp2_cid* cid, uint8_t* token, 
     auto* ref = static_cast<ngtcp2_crypto_conn_ref*>(user_data);
     auto* ctx = static_cast<server_conn_context*>(ref->user_data);
     cid->datalen = cidlen;
-    RAND_bytes(cid->data, static_cast<int>(cidlen));
-    RAND_bytes(token, NGTCP2_STATELESS_RESET_TOKENLEN);
+    if (RAND_bytes(cid->data, static_cast<int>(cidlen)) != 1) {
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+    if (RAND_bytes(token, NGTCP2_STATELESS_RESET_TOKENLEN) != 1) {
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
     ctx->state->cid_map[cid_to_key(cid)] = ctx;
     return 0;
 }
@@ -358,7 +362,7 @@ static server_conn_context* server_create_connection(server_state* state, const 
     params.initial_max_stream_data_uni = 256 * 1024;
     params.initial_max_streams_bidi = 128;
     params.initial_max_streams_uni = 128;
-    params.max_datagram_frame_size = 65535;
+    params.max_datagram_frame_size = MAX_UDP_PAYLOAD;
     params.original_dcid = hd.dcid;
     params.original_dcid_present = 1;
 
@@ -445,8 +449,12 @@ static int client_recv_datagram_cb(ngtcp2_conn*, uint32_t, const uint8_t* data, 
 static int client_get_new_cid_cb(ngtcp2_conn*, ngtcp2_cid* cid, uint8_t* token, size_t cidlen,
                                  void*) {
     cid->datalen = cidlen;
-    RAND_bytes(cid->data, static_cast<int>(cidlen));
-    RAND_bytes(token, NGTCP2_STATELESS_RESET_TOKENLEN);
+    if (RAND_bytes(cid->data, static_cast<int>(cidlen)) != 1) {
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+    if (RAND_bytes(token, NGTCP2_STATELESS_RESET_TOKENLEN) != 1) {
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
     return 0;
 }
 
@@ -840,7 +848,7 @@ class ngtcp2_backend final : public quic_backend {
                         params.initial_max_stream_data_uni = 256 * 1024;
                         params.initial_max_streams_bidi = 128;
                         params.initial_max_streams_uni = 128;
-                        params.max_datagram_frame_size = 65535;
+                        params.max_datagram_frame_size = MAX_UDP_PAYLOAD;
 
                         // Generate CIDs.
                         ngtcp2_cid dcid, scid;

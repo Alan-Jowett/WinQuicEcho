@@ -349,7 +349,8 @@ class picoquic_backend_impl : public quic_backend {
             }
 
             // Enable datagram support via transport parameters.
-            picoquic_set_default_tp_value(quic.get(), picoquic_tp_max_datagram_frame_size, 65535);
+            picoquic_set_default_tp_value(quic.get(), picoquic_tp_max_datagram_frame_size,
+                                          MAX_UDP_PAYLOAD);
 
             // Create and bind UDP socket.
             udp_socket sock(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));

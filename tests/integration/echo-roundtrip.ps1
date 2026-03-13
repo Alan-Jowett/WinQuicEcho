@@ -7,8 +7,10 @@
     that QUIC datagrams are echoed back successfully.
 
 .DESCRIPTION
-    1. Checks that msquic.dll is available on the system.
-    2. Creates a self-signed certificate for the server.
+    1. For Schannel-based backends (msquic, msquic-km), checks that msquic.dll
+       is available; skips with exit code 77 if absent.
+    2. Creates server credentials (Schannel certificate or PEM files depending
+       on the backend).
     3. Starts echo_server on a high port.
     4. Runs echo_client for a short duration against the server.
     5. Parses the client stats-file JSON and asserts:
@@ -16,8 +18,7 @@
        - requests_completed > 0 (server echoed and client received)
     6. Cleans up the server process, certificate, and temp files.
 
-    Exit code 0 = pass, non-zero = fail.  If msquic.dll is absent the test
-    exits with code 77 (skip) to avoid CI failures on runners without QUIC.
+    Exit code 0 = pass, non-zero = fail.
 #>
 
 param(

@@ -39,9 +39,10 @@ struct client_options {
     uint32_t payload_size{64};
     uint32_t connections{1};
     uint32_t outstanding{1};
-    // Certificate validation is enabled by default.  Use --insecure (CLI) to
-    // skip validation for development/testing with self-signed certificates.
-    bool insecure{false};
+    // Certificate validation is disabled by default for benchmark convenience
+    // with self-signed dev certificates.  Use --secure (CLI) to enable
+    // validation when testing against production/trusted certificates.
+    bool insecure{true};
     bool verbose{false};
     std::string stats_file;
 };
