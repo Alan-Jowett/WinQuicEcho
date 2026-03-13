@@ -91,9 +91,10 @@ Optional:
 
 ```powershell
 # Works with any backend — specify which client-side QUIC library to use
-.\echo_client --backend msquic --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
-.\echo_client --backend ngtcp2  --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
-.\echo_client --backend picoquic --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
+# Use --insecure to skip certificate validation when testing with self-signed dev certs
+.\echo_client --backend msquic --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64 --insecure
+.\echo_client --backend ngtcp2  --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64 --insecure
+.\echo_client --backend picoquic --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64 --insecure
 ```
 
 Optional:

@@ -13,8 +13,17 @@ if (NOT WIN32)
     message(FATAL_ERROR "WinQuicEcho is currently supported on Windows only.")
 endif()
 
-# Use static CRT (/MT) so executables don't depend on VC++ redistributable DLLs.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# MSVC runtime selection:
+# By default, use static CRT (/MT) so executables don't depend on VC++ redistributable DLLs.
+# Set -DWINQUICECHO_STATIC_CRT=OFF to use the dynamic CRT (/MD) instead (e.g., to match vcpkg OpenSSL).
+if (MSVC)
+    option(WINQUICECHO_STATIC_CRT "Link MSVC runtime statically (/MT) instead of dynamically (/MD)" ON)
+    if (WINQUICECHO_STATIC_CRT)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    else()
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
+    endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # Optional backends (require OpenSSL; default OFF)

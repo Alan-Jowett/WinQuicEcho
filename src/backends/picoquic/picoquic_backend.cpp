@@ -12,10 +12,12 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -122,6 +124,9 @@ using picoquic_ptr = std::unique_ptr<picoquic_quic_t, picoquic_deleter>;
 struct server_state {
     std::atomic<uint64_t> requests_echoed{0};
     std::atomic<uint64_t> active_connections{0};
+    // Connections that reached the ready state and were counted.
+    // Only accessed from the picoquic callback thread (single-threaded per quic context).
+    std::unordered_set<picoquic_cnx_t*> counted_connections;
     bool verbose{false};
 };
 
@@ -133,6 +138,7 @@ int server_callback(picoquic_cnx_t* cnx, uint64_t stream_id, uint8_t* bytes, siz
 
     switch (event) {
         case picoquic_callback_ready:
+            state->counted_connections.insert(cnx);
             state->active_connections.fetch_add(1, std::memory_order_relaxed);
             break;
 
@@ -151,7 +157,9 @@ int server_callback(picoquic_cnx_t* cnx, uint64_t stream_id, uint8_t* bytes, siz
         case picoquic_callback_close:
         case picoquic_callback_application_close:
         case picoquic_callback_stateless_reset:
-            state->active_connections.fetch_sub(1, std::memory_order_relaxed);
+            if (state->counted_connections.erase(cnx) > 0) {
+                state->active_connections.fetch_sub(1, std::memory_order_relaxed);
+            }
             break;
 
         case picoquic_callback_prepare_datagram:
