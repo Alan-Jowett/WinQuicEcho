@@ -101,6 +101,7 @@ Optional:
 Optional:
 
 - `--insecure`: skip server certificate validation (enabled by default for benchmark convenience)
+- `--secure`: enable server certificate validation
 - `--stats-file <path>`: write final JSON stats
 - `--alpn <name>`: ALPN (default `echo`)
 - `--verbose`

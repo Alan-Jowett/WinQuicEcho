@@ -483,7 +483,8 @@ class picoquic_backend_impl : public quic_backend {
 
                         // Enable datagram support.
                         picoquic_set_default_tp_value(quic.get(),
-                                                      picoquic_tp_max_datagram_frame_size, 65535);
+                                                      picoquic_tp_max_datagram_frame_size,
+                                                      MAX_UDP_PAYLOAD);
 
                         // Disable certificate verification for insecure mode.
                         if (options.insecure) {

@@ -993,7 +993,8 @@ class ngtcp2_backend final : public quic_backend {
                         // Benchmark loop.
                         uint64_t sequence = static_cast<uint64_t>(worker_idx) << 40;
                         const uint32_t payload_size =
-                            std::max<uint32_t>(16, options.payload_size);
+                            std::clamp<uint32_t>(options.payload_size, 16,
+                                                 MAX_UDP_PAYLOAD - 100);  // leave room for QUIC framing
 
                         while (!stop_signal.load(std::memory_order_acquire)) {
                             // Send datagrams while under max_outstanding.
@@ -1029,6 +1030,13 @@ class ngtcp2_backend final : public quic_backend {
                                                               std::memory_order_relaxed);
                                 }
 
+                                // WRITE_MORE means the datagram was accepted but ngtcp2
+                                // coalesced it into an internal buffer — loop to pack more.
+                                // Only send when a full packet is produced (nwrite > 0).
+                                if (nwrite == NGTCP2_ERR_WRITE_MORE) {
+                                    continue;
+                                }
+
                                 if (nwrite > 0) {
                                     sendto(sock.get(), reinterpret_cast<const char*>(buf),
                                            static_cast<int>(nwrite), 0,
@@ -1038,6 +1046,11 @@ class ngtcp2_backend final : public quic_backend {
 
                                 if (nwrite == 0 && !accepted) break;  // Congestion.
                             }
+
+                            // Flush any remaining coalesced packets after the send loop.
+                            client_flush_output(ctx->conn.get(), sock.get(),
+                                                reinterpret_cast<const sockaddr*>(&server_addr),
+                                                sizeof(server_addr));
 
                             // Receive with short timeout.
                             fd_set rfds;

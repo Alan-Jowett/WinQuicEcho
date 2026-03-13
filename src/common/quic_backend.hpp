@@ -40,7 +40,7 @@ struct client_options {
     uint32_t connections{1};
     uint32_t outstanding{1};
     // Certificate validation is disabled by default for benchmark convenience
-    // with self-signed dev certificates.  Use --secure (CLI) to enable
+    // with self-signed dev certificates.  Pass --secure on the CLI to enable
     // validation when testing against production/trusted certificates.
     bool insecure{true};
     bool verbose{false};
