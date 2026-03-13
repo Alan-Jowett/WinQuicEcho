@@ -21,11 +21,11 @@ on:
       repository:
         required: false
         type: string
-        default: Alan-Jowett/WinQuicEcho
+        default: ''
       ref:
         required: false
         type: string
-        default: main
+        default: ''
 
 permissions:
   contents: read
@@ -39,9 +39,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.repository }}
-          ref: ${{ inputs.ref }}
-          fetch-depth: 0
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Configure CMake
         run: cmake -S . -B ${{ inputs.build_dir }} -G "Visual Studio 17 2022" -A x64
