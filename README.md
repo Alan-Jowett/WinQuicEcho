@@ -7,21 +7,45 @@ Windows QUIC echo benchmark in the style of `WinUDPShardedEcho`, with a pluggabl
 
 ## Backends
 
-- `msquic` (default) — user-mode MsQuic (msquic.dll)
+- `msquic` (default) — user-mode MsQuic (msquic.dll), always built
 - `msquic-km` — kernel-mode MsQuic (msquic.sys), the same API surface used by http.sys and SMB server
+- `ngtcp2` (optional) — [ngtcp2](https://github.com/ngtcp2/ngtcp2) with quictls TLS, requires OpenSSL
+- `picoquic` (optional) — [picoquic](https://github.com/nicterq/picoquic) with picotls, requires OpenSSL
 
 The architecture is intentionally backend-neutral, so new QUIC libraries can be added by implementing `quic_backend` and registering it in the factory.
 
 ## Build
 
+### Default (msquic only)
+
 ```powershell
-mkdir build
-cd build
-cmake ..
-cmake --build . --config Release
+cmake -S . -B build -A x64
+cmake --build build --config Release
 ```
 
-## Certificate setup (MsQuic server)
+### With optional backends (ngtcp2 / picoquic)
+
+Both ngtcp2 and picoquic require an OpenSSL-compatible TLS library. Install via [vcpkg](https://vcpkg.io):
+
+```powershell
+vcpkg install openssl:x64-windows
+```
+
+Then enable one or both backends. Since the default vcpkg triplet (`x64-windows`) uses the
+dynamic CRT (`/MD`), pass `-DWINQUICECHO_STATIC_CRT=OFF` to avoid linker mismatches:
+
+```powershell
+cmake -S . -B build -A x64 `
+    -DCMAKE_TOOLCHAIN_FILE="<vcpkg-root>/scripts/buildsystems/vcpkg.cmake" `
+    -DWINQUICECHO_STATIC_CRT=OFF `
+    -DWINQUICECHO_BUILD_NGTCP2=ON `
+    -DWINQUICECHO_BUILD_PICOQUIC=ON
+cmake --build build --config Release
+```
+
+## Certificate setup
+
+### MsQuic (Schannel)
 
 For Windows Schannel-based MsQuic, the easiest path is certificate thumbprint mode:
 
@@ -31,12 +55,29 @@ For Windows Schannel-based MsQuic, the easiest path is certificate thumbprint mo
 
 Use the printed thumbprint with `--cert-hash`.
 
+### ngtcp2 / picoquic (OpenSSL PEM)
+
+Generate a PEM certificate and private key:
+
+```powershell
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 1 -nodes -subj "/CN=localhost"
+```
+
+Pass via `--cert-file cert.pem --key-file key.pem`.
+
 ## Usage
 
 ### Server
 
 ```powershell
+# MsQuic (Schannel)
 .\echo_server --backend msquic --port 5001 --cert-hash <THUMBPRINT>
+
+# ngtcp2 (PEM)
+.\echo_server --backend ngtcp2 --port 5001 --cert-file cert.pem --key-file key.pem
+
+# picoquic (PEM)
+.\echo_server --backend picoquic --port 5001 --cert-file cert.pem --key-file key.pem
 ```
 
 Optional:
@@ -51,12 +92,16 @@ Optional:
 ### Client
 
 ```powershell
+# Works with any backend — specify which client-side QUIC library to use
 .\echo_client --backend msquic --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
+.\echo_client --backend ngtcp2  --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
+.\echo_client --backend picoquic --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
 ```
 
 Optional:
 
-- `--insecure`: skip server certificate validation (default for benchmark convenience)
+- `--insecure`: skip server certificate validation (enabled by default for benchmark convenience)
+- `--secure`: enable server certificate validation
 - `--stats-file <path>`: write final JSON stats
 - `--alpn <name>`: ALPN (default `echo`)
 - `--verbose`
@@ -129,3 +174,5 @@ in kernel mode.
 
 - Metrics currently focus on request completion rate (RPS), bytes, and latency (min/avg/max).
 - Stream-per-request mode is used to provide clear request boundaries for the echo benchmark.
+- All backends use the same datagram payload format (8-byte sequence + 8-byte timestamp + padding), enabling cross-backend testing (e.g., ngtcp2 client ↔ msquic server).
+- ngtcp2 and picoquic are fetched from source via CMake `FetchContent` — no manual library install is needed beyond OpenSSL.

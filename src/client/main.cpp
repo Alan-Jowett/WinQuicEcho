@@ -2,40 +2,32 @@
 // Copyright (c) 2026 WinQuicEcho contributors
 
 #include <algorithm>
-#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 
 #include "backends/msquic/msquic_backend.hpp"
+#ifdef WINQUICECHO_HAS_NGTCP2
+#include "backends/ngtcp2/ngtcp2_backend.hpp"
+#endif
+#ifdef WINQUICECHO_HAS_PICOQUIC
+#include "backends/picoquic/picoquic_backend.hpp"
+#endif
 #include "common/arg_parser.hpp"
+#include "common/parse_utils.hpp"
 #include "common/quic_backend.hpp"
 #include "common/quic_factory.hpp"
-
-namespace {
-
-uint16_t parse_port(const std::string& text) {
-    const long value = std::strtol(text.c_str(), nullptr, 10);
-    if (value <= 0 || value > 65535) {
-        throw std::invalid_argument("Invalid port number.");
-    }
-    return static_cast<uint16_t>(value);
-}
-
-uint32_t parse_u32(const std::string& text, const char* field) {
-    const long value = std::strtol(text.c_str(), nullptr, 10);
-    if (value < 0) {
-        throw std::invalid_argument(std::string("Invalid value for ") + field);
-    }
-    return static_cast<uint32_t>(value);
-}
-
-}  // namespace
 
 int main(int argc, const char* const argv[]) {
     using namespace winquicecho;
 
     register_msquic_backend();
+#ifdef WINQUICECHO_HAS_NGTCP2
+    register_ngtcp2_backend();
+#endif
+#ifdef WINQUICECHO_HAS_PICOQUIC
+    register_picoquic_backend();
+#endif
 
     arg_parser parser;
     parser.add_option("backend", 'b', "msquic", true, "Backend name.");
@@ -46,7 +38,8 @@ int main(int argc, const char* const argv[]) {
     parser.add_option("payload", 'l', "64", true, "Payload bytes per request (minimum 16).");
     parser.add_option("connections", 'c', "1", true, "Number of concurrent client connections.");
     parser.add_option("outstanding", 'n', "1", true, "Outstanding (pipelined) requests per connection.");
-    parser.add_option("insecure", 'i', "0", false, "Disable server certificate validation.");
+    parser.add_option("secure", 'S', "0", false, "Enable server certificate validation (disabled by default).");
+    parser.add_option("insecure", 'i', "0", false, "No-op (insecure is the default); kept for backward compatibility.");
     parser.add_option("stats-file", 'o', "", true, "Write final statistics JSON to file.");
     parser.add_option("verbose", 'v', "0", false, "Enable verbose output.");
     parser.add_option("help", 'h', "0", false, "Show help.");
@@ -63,6 +56,8 @@ int main(int argc, const char* const argv[]) {
 
     client_options options;
     try {
+        using winquicecho::parse_port;
+        using winquicecho::parse_u32;
         options.backend = parser.get("backend");
         options.server = parser.get("server");
         options.port = parse_port(parser.get("port"));
@@ -71,7 +66,7 @@ int main(int argc, const char* const argv[]) {
         options.payload_size = parse_u32(parser.get("payload"), "payload");
         options.connections = std::max<uint32_t>(1, parse_u32(parser.get("connections"), "connections"));
         options.outstanding = std::max<uint32_t>(1, parse_u32(parser.get("outstanding"), "outstanding"));
-        options.insecure = parser.is_set("insecure");
+        options.insecure = !parser.is_set("secure");
         options.stats_file = parser.get("stats-file");
         options.verbose = parser.is_set("verbose");
     } catch (const std::exception& ex) {

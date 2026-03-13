@@ -132,6 +132,44 @@ struct datagram_send_context {
     }
 };
 
+// RAII wrapper for HQUIC handles.  Calls the supplied close function on
+// destruction, preventing leaks when an exception is thrown mid-setup.
+class quic_handle {
+  public:
+    using close_fn_t = void(QUIC_API*)(HQUIC);
+
+    quic_handle() = default;
+    quic_handle(HQUIC h, close_fn_t fn) : handle_(h), close_fn_(fn) {}
+    ~quic_handle() { reset(); }
+
+    quic_handle(const quic_handle&) = delete;
+    quic_handle& operator=(const quic_handle&) = delete;
+    quic_handle(quic_handle&& other) noexcept : handle_(other.handle_), close_fn_(other.close_fn_) {
+        other.handle_ = nullptr;
+    }
+    quic_handle& operator=(quic_handle&& other) noexcept {
+        if (this != &other) {
+            reset();
+            handle_ = other.handle_;
+            close_fn_ = other.close_fn_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+
+    HQUIC get() const { return handle_; }
+    void reset() {
+        if (handle_) {
+            close_fn_(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+  private:
+    HQUIC handle_{nullptr};
+    close_fn_t close_fn_{nullptr};
+};
+
 struct server_state {
     const QUIC_API_TABLE* api{nullptr};
     HQUIC configuration{nullptr};
@@ -173,6 +211,8 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
                 std::cerr << "[server] datagram received bytes=" << received->Length << "\n";
             }
 
+            // TODO: consider a pool allocator for datagram_send_context to reduce
+            // per-datagram heap allocation overhead in the hot path.
             auto* send_ctx = new datagram_send_context();
             send_ctx->payload.resize(received->Length);
             if (received->Length > 0) {
@@ -190,6 +230,10 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
                 return QUIC_STATUS_SUCCESS;
             }
 
+            // NOTE: bytes_sent/requests_echoed are incremented after DatagramSend
+            // is queued, not after the send completes asynchronously.  For a
+            // benchmark with unreliable datagrams this is acceptable — lost
+            // sends are expected and counted as "sent" for throughput stats.
             state->bytes_received.fetch_add(received->Length, std::memory_order_relaxed);
             state->bytes_sent.fetch_add(received->Length, std::memory_order_relaxed);
             state->requests_echoed.fetch_add(1, std::memory_order_relaxed);
@@ -216,12 +260,15 @@ QUIC_STATUS QUIC_API server_connection_callback(HQUIC connection, void* context,
             if (state->verbose) {
                 std::cerr << "[server] connection shutdown complete\n";
             }
+            bool should_close = false;
             {
                 std::lock_guard<std::mutex> lock(state->connection_mutex);
-                state->live_connections.erase(connection);
+                should_close = state->live_connections.erase(connection) > 0;
             }
-            state->active_connections.fetch_sub(1, std::memory_order_relaxed);
-            state->api->ConnectionClose(connection);
+            if (should_close) {
+                state->active_connections.fetch_sub(1, std::memory_order_relaxed);
+                state->api->ConnectionClose(connection);
+            }
             delete connection_ctx;
             return QUIC_STATUS_SUCCESS;
         }
@@ -441,9 +488,10 @@ class msquic_backend final : public quic_backend {
             msquic_library library;
             const QUIC_API_TABLE* api = library.api();
 
-            HQUIC registration = nullptr;
-            HQUIC configuration = nullptr;
-            HQUIC listener = nullptr;
+            // RAII handles — destroyed in reverse order (listener → config → registration).
+            quic_handle registration;
+            quic_handle configuration;
+            quic_handle listener;
 
             server_state state{};
             state.api = api;
@@ -452,8 +500,12 @@ class msquic_backend final : public quic_backend {
             QUIC_REGISTRATION_CONFIG registration_config{};
             registration_config.AppName = "WinQuicEcho.Server";
             registration_config.ExecutionProfile = QUIC_EXECUTION_PROFILE_TYPE_MAX_THROUGHPUT;
-            throw_on_failure(api->RegistrationOpen(&registration_config, &registration),
-                             "RegistrationOpen failed");
+            {
+                HQUIC h = nullptr;
+                throw_on_failure(api->RegistrationOpen(&registration_config, &h),
+                                 "RegistrationOpen failed");
+                registration = quic_handle(h, api->RegistrationClose);
+            }
 
             QUIC_BUFFER alpn{};
             alpn.Length = static_cast<uint32_t>(options.alpn.size());
@@ -465,11 +517,15 @@ class msquic_backend final : public quic_backend {
             server_settings.IsSet.PeerUnidiStreamCount = TRUE;
             server_settings.DatagramReceiveEnabled = TRUE;
             server_settings.IsSet.DatagramReceiveEnabled = TRUE;
-            throw_on_failure(
-                api->ConfigurationOpen(registration, &alpn, 1, &server_settings,
-                                       sizeof(server_settings), nullptr, &configuration),
-                "ConfigurationOpen failed");
-            state.configuration = configuration;
+            {
+                HQUIC h = nullptr;
+                throw_on_failure(
+                    api->ConfigurationOpen(registration.get(), &alpn, 1, &server_settings,
+                                           sizeof(server_settings), nullptr, &h),
+                    "ConfigurationOpen failed");
+                configuration = quic_handle(h, api->ConfigurationClose);
+            }
+            state.configuration = configuration.get();
 
             QUIC_CREDENTIAL_CONFIG cred_config{};
             QUIC_CERTIFICATE_HASH cert_hash{};
@@ -519,24 +575,28 @@ class msquic_backend final : public quic_backend {
                 throw std::runtime_error(
                     "Server credentials are required. Provide --cert-hash, --cert-pfx, or --cert-file/--key-file.");
             }
-            throw_on_failure(api->ConfigurationLoadCredential(configuration, &cred_config),
+            throw_on_failure(api->ConfigurationLoadCredential(configuration.get(), &cred_config),
                              "ConfigurationLoadCredential failed");
 
-            throw_on_failure(api->ListenerOpen(registration, server_listener_callback, &state, &listener),
-                             "ListenerOpen failed");
+            {
+                HQUIC h = nullptr;
+                throw_on_failure(api->ListenerOpen(registration.get(), server_listener_callback, &state, &h),
+                                 "ListenerOpen failed");
+                listener = quic_handle(h, api->ListenerClose);
+            }
 
             QUIC_ADDR local_address{};
             std::memset(&local_address, 0, sizeof(local_address));
             QuicAddrSetFamily(&local_address, QUIC_ADDRESS_FAMILY_INET);
             QuicAddrSetPort(&local_address, options.port);
-            throw_on_failure(api->ListenerStart(listener, &alpn, 1, &local_address),
+            throw_on_failure(api->ListenerStart(listener.get(), &alpn, 1, &local_address),
                              "ListenerStart failed");
 
             if (options.verbose) {
                 QUIC_ADDR bound{};
                 uint32_t bound_size = sizeof(bound);
                 const QUIC_STATUS get_param_status =
-                    api->GetParam(listener, QUIC_PARAM_LISTENER_LOCAL_ADDRESS, &bound_size, &bound);
+                    api->GetParam(listener.get(), QUIC_PARAM_LISTENER_LOCAL_ADDRESS, &bound_size, &bound);
                 if (QUIC_SUCCEEDED(get_param_status)) {
                     std::cout << "[server] bound family="
                               << static_cast<int>(bound.si_family)
@@ -572,7 +632,7 @@ class msquic_backend final : public quic_backend {
                           << " TotalEchoed=" << current << "\n" << std::flush;
             }
 
-            api->ListenerStop(listener);
+            api->ListenerStop(listener.get());
             std::vector<HQUIC> live_connections;
             {
                 std::lock_guard<std::mutex> lock(state.connection_mutex);
@@ -592,9 +652,28 @@ class msquic_backend final : public quic_backend {
                 std::this_thread::sleep_for(std::chrono::milliseconds(25));
             }
 
-            api->ListenerClose(listener);
-            api->ConfigurationClose(configuration);
-            api->RegistrationClose(registration);
+            // Force-close any connections that didn't complete shutdown in time.
+            // Without this, RAII handle cleanup (RegistrationClose) can block.
+            // We clear live_connections and decrement active_connections for each
+            // orphaned handle so SHUTDOWN_COMPLETE callbacks won't double-decrement.
+            {
+                std::vector<HQUIC> orphaned;
+                {
+                    std::lock_guard<std::mutex> lock(state.connection_mutex);
+                    orphaned.assign(state.live_connections.begin(), state.live_connections.end());
+                    state.live_connections.clear();
+                }
+                if (!orphaned.empty()) {
+                    state.active_connections.fetch_sub(
+                        static_cast<uint64_t>(orphaned.size()), std::memory_order_relaxed);
+                }
+                for (HQUIC connection : orphaned) {
+                    api->ConnectionClose(connection);
+                }
+            }
+
+            // RAII guards close listener, configuration, and registration in
+            // reverse order when leaving this scope.
 
             std::cout << "Final echoed requests: "
                       << state.requests_echoed.load(std::memory_order_relaxed) << "\n";
@@ -612,14 +691,19 @@ class msquic_backend final : public quic_backend {
             msquic_library library;
             const QUIC_API_TABLE* api = library.api();
 
-            HQUIC registration = nullptr;
-            HQUIC configuration = nullptr;
+            // RAII handles — destroyed in reverse order (config → registration).
+            quic_handle registration;
+            quic_handle configuration;
 
             QUIC_REGISTRATION_CONFIG registration_config{};
             registration_config.AppName = "WinQuicEcho.Client";
             registration_config.ExecutionProfile = QUIC_EXECUTION_PROFILE_TYPE_MAX_THROUGHPUT;
-            throw_on_failure(api->RegistrationOpen(&registration_config, &registration),
-                             "RegistrationOpen failed");
+            {
+                HQUIC h = nullptr;
+                throw_on_failure(api->RegistrationOpen(&registration_config, &h),
+                                 "RegistrationOpen failed");
+                registration = quic_handle(h, api->RegistrationClose);
+            }
 
             QUIC_BUFFER alpn{};
             alpn.Length = static_cast<uint32_t>(options.alpn.size());
@@ -627,10 +711,14 @@ class msquic_backend final : public quic_backend {
             QUIC_SETTINGS client_settings{};
             client_settings.DatagramReceiveEnabled = TRUE;
             client_settings.IsSet.DatagramReceiveEnabled = TRUE;
-            throw_on_failure(
-                api->ConfigurationOpen(registration, &alpn, 1, &client_settings,
-                                       sizeof(client_settings), nullptr, &configuration),
-                "ConfigurationOpen failed");
+            {
+                HQUIC h = nullptr;
+                throw_on_failure(
+                    api->ConfigurationOpen(registration.get(), &alpn, 1, &client_settings,
+                                           sizeof(client_settings), nullptr, &h),
+                    "ConfigurationOpen failed");
+                configuration = quic_handle(h, api->ConfigurationClose);
+            }
 
             QUIC_CREDENTIAL_CONFIG client_cred{};
             client_cred.Type = QUIC_CREDENTIAL_TYPE_NONE;
@@ -639,7 +727,7 @@ class msquic_backend final : public quic_backend {
                 client_cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
                     client_cred.Flags | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
             }
-            throw_on_failure(api->ConfigurationLoadCredential(configuration, &client_cred),
+            throw_on_failure(api->ConfigurationLoadCredential(configuration.get(), &client_cred),
                              "ConfigurationLoadCredential failed");
 
             client_state state{};
@@ -655,7 +743,7 @@ class msquic_backend final : public quic_backend {
             workers.reserve(worker_count);
             for (uint32_t worker = 0; worker < worker_count; ++worker) {
                 workers.emplace_back([&, worker]() {
-                    auto* connection_ctx = new client_connection_context();
+                    auto connection_ctx = std::make_unique<client_connection_context>();
                     connection_ctx->api = api;
                     connection_ctx->state = &state;
                     connection_ctx->max_outstanding = options.outstanding;
@@ -663,15 +751,14 @@ class msquic_backend final : public quic_backend {
 
                     HQUIC connection = nullptr;
                     QUIC_STATUS status =
-                        api->ConnectionOpen(registration, client_connection_callback, connection_ctx,
-                                            &connection);
+                        api->ConnectionOpen(registration.get(), client_connection_callback,
+                                            connection_ctx.get(), &connection);
                     if (QUIC_FAILED(status)) {
                         state.errors.fetch_add(1, std::memory_order_relaxed);
-                        delete connection_ctx;
                         return;
                     }
 
-                    status = api->ConnectionStart(connection, configuration, QUIC_ADDRESS_FAMILY_INET,
+                    status = api->ConnectionStart(connection, configuration.get(), QUIC_ADDRESS_FAMILY_INET,
                                                   options.server.c_str(), options.port);
                     if (QUIC_FAILED(status)) {
                         if (state.verbose) {
@@ -680,7 +767,6 @@ class msquic_backend final : public quic_backend {
                         }
                         state.errors.fetch_add(1, std::memory_order_relaxed);
                         api->ConnectionClose(connection);
-                        delete connection_ctx;
                         return;
                     }
 
@@ -697,13 +783,11 @@ class msquic_backend final : public quic_backend {
                             state.errors.fetch_add(1, std::memory_order_relaxed);
                             api->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 1);
                             api->ConnectionClose(connection);
-                            delete connection_ctx;
                             return;
                         }
                         if (connection_ctx->failed) {
                             state.errors.fetch_add(1, std::memory_order_relaxed);
                             api->ConnectionClose(connection);
-                            delete connection_ctx;
                             return;
                         }
                         if (!connection_ctx->cv.wait_for(
@@ -715,13 +799,15 @@ class msquic_backend final : public quic_backend {
                             state.errors.fetch_add(1, std::memory_order_relaxed);
                             api->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 1);
                             api->ConnectionClose(connection);
-                            delete connection_ctx;
                             return;
                         }
                     }
 
                     connected_workers.fetch_add(1, std::memory_order_release);
 
+                    // Each worker gets a unique 24-bit keyspace (worker << 40),
+                    // giving each worker up to 2^40 (~1 trillion) sequence numbers
+                    // before collision with another worker's range.
                     uint64_t sequence = static_cast<uint64_t>(worker) << 40;
                     const uint32_t payload_size = std::max<uint32_t>(16, options.payload_size);
 
@@ -766,6 +852,8 @@ class msquic_backend final : public quic_backend {
                         }
 
                         const uint64_t request_sequence = ++sequence;
+                        // TODO: consider a pool allocator for datagram_send_context to reduce
+                        // per-datagram heap allocation overhead in the hot path.
                         auto* send_ctx = new datagram_send_context();
                         send_ctx->payload.resize(std::max<uint32_t>(16, effective_payload_size));
                         fill_payload(send_ctx->payload, request_sequence);
@@ -803,7 +891,7 @@ class msquic_backend final : public quic_backend {
                                                     [&] { return connection_ctx->shutdown_complete; });
                     }
                     api->ConnectionClose(connection);
-                    delete connection_ctx;
+                    // connection_ctx is released by unique_ptr when the lambda exits.
                 });
             }
 
@@ -818,8 +906,7 @@ class msquic_backend final : public quic_backend {
                 for (auto& worker : workers) {
                     worker.join();
                 }
-                api->ConfigurationClose(configuration);
-                api->RegistrationClose(registration);
+                // RAII guards close configuration and registration.
                 summary.exit_code = 1;
                 summary.errors = state.errors.load(std::memory_order_relaxed);
                 return summary;
@@ -847,8 +934,7 @@ class msquic_backend final : public quic_backend {
                 worker.join();
             }
 
-            api->ConfigurationClose(configuration);
-            api->RegistrationClose(registration);
+            // RAII guards close configuration and registration.
 
             const auto end = steady_clock::now();
             const double duration_seconds =
@@ -893,7 +979,8 @@ class msquic_backend final : public quic_backend {
                 if (out) {
                     out << "{\n";
                     out << "  \"backend\": \"msquic\",\n";
-                    out << "  \"duration_s\": " << duration_seconds << ",\n";
+                    out << "  \"duration_s\": " << std::fixed << std::setprecision(3)
+                        << duration_seconds << ",\n";
                     out << "  \"requests_sent\": " << summary.requests_sent << ",\n";
                     out << "  \"requests_completed\": " << summary.requests_completed << ",\n";
                     out << "  \"errors\": " << summary.errors << ",\n";

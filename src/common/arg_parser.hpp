@@ -102,6 +102,7 @@ class arg_parser {
 
         const auto it = opts_.find(key);
         if (it == opts_.end()) {
+            std::cerr << "Warning: unknown option '--" << key << "' (ignored)\n";
             return;
         }
         set_option_value(it->second, argc, argv, index, value);
@@ -110,6 +111,7 @@ class arg_parser {
     void parse_short_option(int argc, const char* const argv[], int& index, char short_name) {
         const auto map_it = short_to_long_.find(short_name);
         if (map_it == short_to_long_.end()) {
+            std::cerr << "Warning: unknown option '-" << short_name << "' (ignored)\n";
             return;
         }
         const auto opt_it = opts_.find(map_it->second);
