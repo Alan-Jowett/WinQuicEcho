@@ -36,6 +36,7 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 
+#include <cstdlib>
 #include "common/metrics.hpp"
 #include "common/quic_factory.hpp"
 
