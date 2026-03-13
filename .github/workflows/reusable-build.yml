@@ -36,11 +36,18 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (explicit ref)
+        if: ${{ inputs.ref != '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ inputs.ref }}
+
+      - name: Checkout repository (default ref)
+        if: ${{ inputs.ref == '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository || github.repository }}
 
       - name: Configure CMake
         run: cmake -S . -B ${{ inputs.build_dir }} -G "Visual Studio 17 2022" -A x64
