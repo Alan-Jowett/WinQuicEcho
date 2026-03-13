@@ -376,10 +376,19 @@ class picoquic_backend_impl : public quic_backend {
             std::cout << "Listening on UDP port " << options.port << " with ALPN '"
                       << options.alpn << "' (picoquic)\n";
 
-            auto last_report = steady_clock::now();
+            const auto start = steady_clock::now();
+            auto last_report = start;
             uint64_t previous = 0;
 
             while (!shutdown_requested.load(std::memory_order_acquire)) {
+                if (options.duration_seconds > 0) {
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                             steady_clock::now() - start)
+                                             .count();
+                    if (elapsed >= static_cast<int64_t>(options.duration_seconds)) {
+                        break;
+                    }
+                }
                 // Wait for data or timeout.
                 fd_set rfds;
                 FD_ZERO(&rfds);

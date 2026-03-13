@@ -31,11 +31,13 @@ Both ngtcp2 and picoquic require an OpenSSL-compatible TLS library. Install via 
 vcpkg install openssl:x64-windows
 ```
 
-Then enable one or both backends:
+Then enable one or both backends. Since the default vcpkg triplet (`x64-windows`) uses the
+dynamic CRT (`/MD`), pass `-DWINQUICECHO_STATIC_CRT=OFF` to avoid linker mismatches:
 
 ```powershell
 cmake -S . -B build -A x64 `
     -DCMAKE_TOOLCHAIN_FILE="<vcpkg-root>/scripts/buildsystems/vcpkg.cmake" `
+    -DWINQUICECHO_STATIC_CRT=OFF `
     -DWINQUICECHO_BUILD_NGTCP2=ON `
     -DWINQUICECHO_BUILD_PICOQUIC=ON
 cmake --build build --config Release

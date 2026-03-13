@@ -654,12 +654,18 @@ class msquic_backend final : public quic_backend {
 
             // Force-close any connections that didn't complete shutdown in time.
             // Without this, RAII handle cleanup (RegistrationClose) can block.
+            // We clear live_connections and decrement active_connections for each
+            // orphaned handle so SHUTDOWN_COMPLETE callbacks won't double-decrement.
             {
                 std::vector<HQUIC> orphaned;
                 {
                     std::lock_guard<std::mutex> lock(state.connection_mutex);
                     orphaned.assign(state.live_connections.begin(), state.live_connections.end());
                     state.live_connections.clear();
+                }
+                if (!orphaned.empty()) {
+                    state.active_connections.fetch_sub(
+                        static_cast<uint64_t>(orphaned.size()), std::memory_order_relaxed);
                 }
                 for (HQUIC connection : orphaned) {
                     api->ConnectionClose(connection);

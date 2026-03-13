@@ -61,7 +61,9 @@ uint64_t now_ns() {
 
 void generate_cid(ngtcp2_cid* cid, size_t len) {
     cid->datalen = len;
-    RAND_bytes(cid->data, static_cast<int>(len));
+    if (RAND_bytes(cid->data, static_cast<int>(len)) != 1) {
+        throw std::runtime_error("RAND_bytes failed in generate_cid");
+    }
 }
 
 std::string cid_to_key(const ngtcp2_cid* cid) {
@@ -175,7 +177,10 @@ static int server_alpn_select_cb(SSL*, const unsigned char** out, unsigned char*
 // ngtcp2 callbacks — shared helpers
 // ---------------------------------------------------------------------------
 static void rand_cb(uint8_t* dest, size_t destlen, const ngtcp2_rand_ctx*) {
-    RAND_bytes(dest, static_cast<int>(destlen));
+    if (RAND_bytes(dest, static_cast<int>(destlen)) != 1) {
+        // ngtcp2 rand_cb has no error return path; abort to avoid using weak randomness.
+        std::abort();
+    }
 }
 
 static ngtcp2_callbacks make_base_callbacks() {
@@ -793,11 +798,16 @@ class ngtcp2_backend final : public quic_backend {
                         SSL_set_connect_state(ssl.get());
 
                         // Set ALPN.
+                        if (options.alpn.size() > 255) {
+                            throw std::runtime_error("ALPN string exceeds 255 bytes");
+                        }
                         std::vector<uint8_t> alpn_wire;
                         alpn_wire.push_back(static_cast<uint8_t>(options.alpn.size()));
                         alpn_wire.insert(alpn_wire.end(), options.alpn.begin(), options.alpn.end());
-                        SSL_set_alpn_protos(ssl.get(), alpn_wire.data(),
-                                            static_cast<unsigned int>(alpn_wire.size()));
+                        if (SSL_set_alpn_protos(ssl.get(), alpn_wire.data(),
+                                                static_cast<unsigned int>(alpn_wire.size())) != 0) {
+                            throw std::runtime_error("SSL_set_alpn_protos failed");
+                        }
 
                         // Set SNI (required for TLS).
                         SSL_set_tlsext_host_name(ssl.get(), options.server.c_str());
