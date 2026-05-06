@@ -794,12 +794,12 @@ class msquic_backend final : public quic_backend {
 
                     {
                         std::unique_lock<std::mutex> lock(connection_ctx->mutex);
-                        if (!connection_ctx->cv.wait_for(
-                                lock, std::chrono::seconds(options.connect_timeout_seconds),
-                                                         [&] {
-                                                             return connection_ctx->connected ||
-                                                                     connection_ctx->failed;
-                                                         })) {
+                        const auto connect_deadline =
+                            steady_clock::now() +
+                            std::chrono::seconds(options.connect_timeout_seconds);
+                        if (!connection_ctx->cv.wait_until(lock, connect_deadline, [&] {
+                                return connection_ctx->connected || connection_ctx->failed;
+                            })) {
                             if (state.verbose) {
                                 std::cerr << "[client] connection timeout waiting for CONNECTED event\n";
                             }
@@ -813,8 +813,8 @@ class msquic_backend final : public quic_backend {
                             api->ConnectionClose(connection);
                             return;
                         }
-                        if (!connection_ctx->cv.wait_for(
-                                lock, std::chrono::seconds(options.connect_timeout_seconds),
+                        if (!connection_ctx->cv.wait_until(
+                                lock, connect_deadline,
                                 [&] { return connection_ctx->datagram_send_enabled; })) {
                             if (state.verbose) {
                                 std::cerr << "[client] timeout waiting for datagram send to be enabled\n";

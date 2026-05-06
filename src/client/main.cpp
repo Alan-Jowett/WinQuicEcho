@@ -41,7 +41,7 @@ int main(int argc, const char* const argv[]) {
     parser.add_option("connect-timeout", '\0', "30", true,
                       "Per-connection startup timeout in seconds.");
     parser.add_option("startup-timeout", '\0', "30", true,
-                      "How long to wait for the first connected worker before aborting.");
+                      "How long to wait in seconds for the first connected worker before aborting.");
     parser.add_option("warmup", '\0', "5", true,
                       "Additional warmup time in seconds after the first worker connects.");
     parser.add_option("connect-stagger-ms", '\0', "25", true,
