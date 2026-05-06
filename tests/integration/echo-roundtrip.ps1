@@ -29,6 +29,10 @@ param(
     [int]$Port = 0,
     [int]$Duration = 5,
     [int]$Connections = 2,
+    [int]$ConnectTimeout = 10,
+    [int]$StartupTimeout = 10,
+    [int]$Warmup = 1,
+    [int]$ConnectStaggerMs = 5,
     [string]$Backend = "msquic"
 )
 
@@ -273,6 +277,10 @@ try {
         "--port",         "$Port",
         "--connections",  "$Connections",
         "--duration",     "$Duration",
+        "--connect-timeout", "$ConnectTimeout",
+        "--startup-timeout", "$StartupTimeout",
+        "--warmup", "$Warmup",
+        "--connect-stagger-ms", "$ConnectStaggerMs",
         "--insecure",
         "--payload",      "64",
         "--stats-file",   $statsFile,

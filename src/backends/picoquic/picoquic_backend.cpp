@@ -451,10 +451,33 @@ class picoquic_backend_impl : public quic_backend {
 
             std::vector<std::thread> workers;
             workers.reserve(worker_count);
+            const auto connect_wave_start = steady_clock::now();
 
             for (uint32_t worker_idx = 0; worker_idx < worker_count; ++worker_idx) {
                 workers.emplace_back([&, worker_idx]() {
                     try {
+                        if (options.connect_stagger_ms > 0 && worker_idx > 0) {
+                            const auto target =
+                                connect_wave_start +
+                                std::chrono::milliseconds(
+                                    static_cast<uint64_t>(options.connect_stagger_ms) * worker_idx);
+                            while (!stop_signal.load(std::memory_order_acquire)) {
+                                const auto now = steady_clock::now();
+                                if (now >= target) {
+                                    break;
+                                }
+                                const auto remaining = target - now;
+                                const auto sleep_step =
+                                    std::chrono::duration_cast<steady_clock::duration>(
+                                        std::chrono::milliseconds(5));
+                                std::this_thread::sleep_for(
+                                    remaining < sleep_step ? remaining : sleep_step);
+                            }
+                            if (stop_signal.load(std::memory_order_acquire)) {
+                                return;
+                            }
+                        }
+
                         auto ctx = std::make_unique<client_conn_context>();
                         ctx->state = &state;
                         ctx->max_outstanding = options.outstanding;
@@ -556,7 +579,9 @@ class picoquic_backend_impl : public quic_backend {
                         flush_outgoing(sock.get(), quic.get());
 
                         // Handshake loop — wait for picoquic_callback_ready.
-                        auto handshake_deadline = steady_clock::now() + std::chrono::seconds(5);
+                        auto handshake_deadline =
+                            steady_clock::now() +
+                            std::chrono::seconds(options.connect_timeout_seconds);
                         while (!ctx->connected.load(std::memory_order_acquire) &&
                                !ctx->closed.load(std::memory_order_acquire) &&
                                steady_clock::now() < handshake_deadline &&
@@ -661,20 +686,35 @@ class picoquic_backend_impl : public quic_backend {
                 });
             }
 
-            // Wait for at least one worker to connect.
-            for (int i = 0;
-                 i < 100 && connected_workers.load(std::memory_order_acquire) == 0; ++i) {
+            const auto startup_deadline =
+                steady_clock::now() + std::chrono::seconds(options.startup_timeout_seconds);
+            while (connected_workers.load(std::memory_order_acquire) == 0 &&
+                   steady_clock::now() < startup_deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             if (connected_workers.load(std::memory_order_acquire) == 0) {
-                std::cerr << "[picoquic-client] No workers connected after 10s – aborting.\n";
+                std::cerr << "[picoquic-client] No workers connected after "
+                          << options.startup_timeout_seconds << "s – aborting.\n";
                 stop_signal.store(true, std::memory_order_release);
                 for (auto& w : workers) w.join();
                 summary.exit_code = 1;
                 summary.errors = state.errors.load(std::memory_order_relaxed);
                 return summary;
             }
+
+            if (options.warmup_seconds > 0) {
+                const auto warmup_deadline =
+                    steady_clock::now() + std::chrono::seconds(options.warmup_seconds);
+                while (connected_workers.load(std::memory_order_acquire) < worker_count &&
+                       steady_clock::now() < warmup_deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+
+            std::cout << "[picoquic-client] Starting measurement with "
+                      << connected_workers.load(std::memory_order_acquire) << "/"
+                      << worker_count << " connected workers\n";
 
             // Monitor loop.
             const auto benchmark_start = steady_clock::now();

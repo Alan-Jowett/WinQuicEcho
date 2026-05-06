@@ -96,6 +96,10 @@ Optional:
 .\echo_client --backend msquic --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
 .\echo_client --backend ngtcp2  --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
 .\echo_client --backend picoquic --server 127.0.0.1 --port 5001 --connections 8 --duration 15 --payload 64
+
+# Ramped startup for high-connection RPS sweeps
+.\echo_client --backend msquic --server 10.0.0.2 --port 5001 --connections 128 --outstanding 16 --payload 16 `
+    --connect-timeout 30 --startup-timeout 30 --warmup 5 --connect-stagger-ms 25 --insecure
 ```
 
 Optional:
@@ -104,6 +108,10 @@ Optional:
 - `--secure`: enable server certificate validation
 - `--stats-file <path>`: write final JSON stats
 - `--alpn <name>`: ALPN (default `echo`)
+- `--connect-timeout <seconds>`: per-connection startup timeout before that worker gives up
+- `--startup-timeout <seconds>`: how long to wait for the first connected worker before aborting
+- `--warmup <seconds>`: extra warmup time after the first worker connects before measurement starts
+- `--connect-stagger-ms <milliseconds>`: delay between launching successive connection workers
 - `--verbose`
 
 ## Kernel-mode backend (`msquic-km`)

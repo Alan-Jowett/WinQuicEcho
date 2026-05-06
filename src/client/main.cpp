@@ -38,6 +38,14 @@ int main(int argc, const char* const argv[]) {
     parser.add_option("payload", 'l', "64", true, "Payload bytes per request (minimum 16).");
     parser.add_option("connections", 'c', "1", true, "Number of concurrent client connections.");
     parser.add_option("outstanding", 'n', "1", true, "Outstanding (pipelined) requests per connection.");
+    parser.add_option("connect-timeout", '\0', "30", true,
+                      "Per-connection startup timeout in seconds.");
+    parser.add_option("startup-timeout", '\0', "30", true,
+                      "How long to wait for the first connected worker before aborting.");
+    parser.add_option("warmup", '\0', "5", true,
+                      "Additional warmup time in seconds after the first worker connects.");
+    parser.add_option("connect-stagger-ms", '\0', "25", true,
+                      "Delay between starting successive connection workers in milliseconds.");
     parser.add_option("secure", 'S', "0", false, "Enable server certificate validation (disabled by default).");
     parser.add_option("insecure", 'i', "0", false, "No-op (insecure is the default); kept for backward compatibility.");
     parser.add_option("stats-file", 'o', "", true, "Write final statistics JSON to file.");
@@ -66,6 +74,13 @@ int main(int argc, const char* const argv[]) {
         options.payload_size = parse_u32(parser.get("payload"), "payload");
         options.connections = std::max<uint32_t>(1, parse_u32(parser.get("connections"), "connections"));
         options.outstanding = std::max<uint32_t>(1, parse_u32(parser.get("outstanding"), "outstanding"));
+        options.connect_timeout_seconds =
+            std::max<uint32_t>(1, parse_u32(parser.get("connect-timeout"), "connect-timeout"));
+        options.startup_timeout_seconds =
+            std::max<uint32_t>(1, parse_u32(parser.get("startup-timeout"), "startup-timeout"));
+        options.warmup_seconds = parse_u32(parser.get("warmup"), "warmup");
+        options.connect_stagger_ms =
+            parse_u32(parser.get("connect-stagger-ms"), "connect-stagger-ms");
         options.insecure = !parser.is_set("secure");
         options.stats_file = parser.get("stats-file");
         options.verbose = parser.is_set("verbose");

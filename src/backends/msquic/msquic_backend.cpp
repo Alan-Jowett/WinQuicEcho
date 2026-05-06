@@ -741,8 +741,30 @@ class msquic_backend final : public quic_backend {
 
             std::vector<std::thread> workers;
             workers.reserve(worker_count);
+            const auto connect_wave_start = steady_clock::now();
             for (uint32_t worker = 0; worker < worker_count; ++worker) {
                 workers.emplace_back([&, worker]() {
+                    if (options.connect_stagger_ms > 0 && worker > 0) {
+                        const auto target =
+                            connect_wave_start +
+                            std::chrono::milliseconds(
+                                static_cast<uint64_t>(options.connect_stagger_ms) * worker);
+                        while (!stop_signal.load(std::memory_order_acquire)) {
+                            const auto now = steady_clock::now();
+                            if (now >= target) {
+                                break;
+                            }
+                            const auto remaining = target - now;
+                            const auto sleep_step = std::chrono::duration_cast<steady_clock::duration>(
+                                std::chrono::milliseconds(5));
+                            std::this_thread::sleep_for(
+                                remaining < sleep_step ? remaining : sleep_step);
+                        }
+                        if (stop_signal.load(std::memory_order_acquire)) {
+                            return;
+                        }
+                    }
+
                     auto connection_ctx = std::make_unique<client_connection_context>();
                     connection_ctx->api = api;
                     connection_ctx->state = &state;
@@ -772,10 +794,11 @@ class msquic_backend final : public quic_backend {
 
                     {
                         std::unique_lock<std::mutex> lock(connection_ctx->mutex);
-                        if (!connection_ctx->cv.wait_for(lock, std::chrono::seconds(5),
+                        if (!connection_ctx->cv.wait_for(
+                                lock, std::chrono::seconds(options.connect_timeout_seconds),
                                                          [&] {
                                                              return connection_ctx->connected ||
-                                                                    connection_ctx->failed;
+                                                                     connection_ctx->failed;
                                                          })) {
                             if (state.verbose) {
                                 std::cerr << "[client] connection timeout waiting for CONNECTED event\n";
@@ -791,7 +814,7 @@ class msquic_backend final : public quic_backend {
                             return;
                         }
                         if (!connection_ctx->cv.wait_for(
-                                lock, std::chrono::seconds(5),
+                                lock, std::chrono::seconds(options.connect_timeout_seconds),
                                 [&] { return connection_ctx->datagram_send_enabled; })) {
                             if (state.verbose) {
                                 std::cerr << "[client] timeout waiting for datagram send to be enabled\n";
@@ -895,13 +918,16 @@ class msquic_backend final : public quic_backend {
                 });
             }
 
-            // Wait for at least one worker to connect before monitoring.
-            for (int i = 0; i < 100 && connected_workers.load(std::memory_order_acquire) == 0; ++i) {
+            const auto startup_deadline =
+                steady_clock::now() + std::chrono::seconds(options.startup_timeout_seconds);
+            while (connected_workers.load(std::memory_order_acquire) == 0 &&
+                   steady_clock::now() < startup_deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             if (connected_workers.load(std::memory_order_acquire) == 0) {
-                std::cerr << "[client] No workers connected after 10s – aborting.\n";
+                std::cerr << "[client] No workers connected after "
+                          << options.startup_timeout_seconds << "s – aborting.\n";
                 stop_signal.store(true, std::memory_order_release);
                 for (auto& worker : workers) {
                     worker.join();
@@ -911,6 +937,19 @@ class msquic_backend final : public quic_backend {
                 summary.errors = state.errors.load(std::memory_order_relaxed);
                 return summary;
             }
+
+            if (options.warmup_seconds > 0) {
+                const auto warmup_deadline =
+                    steady_clock::now() + std::chrono::seconds(options.warmup_seconds);
+                while (connected_workers.load(std::memory_order_acquire) < worker_count &&
+                       steady_clock::now() < warmup_deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+
+            std::cout << "[client] Starting measurement with "
+                      << connected_workers.load(std::memory_order_acquire) << "/"
+                      << worker_count << " connected workers\n";
 
             // The monitoring loop runs for the benchmark duration (starting now).
             const auto benchmark_start = steady_clock::now();
