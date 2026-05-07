@@ -58,55 +58,45 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
 
-      - name: Install Windows WDK
+      - name: Download WDK and SDK NuGet packages
         shell: pwsh
         run: |
-          # The runner has the WDK VS extension but not the full WDK headers.
-          # Download and install the WDK NuGet content for MSBuild kernel builds.
           $wdkVersion = '10.0.26100.6584'
+          $sdkVersion = '10.0.26100.1'
           $nugetDir = 'nuget'
+
           nuget install Microsoft.Windows.WDK.x64 -Version $wdkVersion -OutputDirectory $nugetDir -Verbosity quiet
+          if ($LASTEXITCODE -ne 0) { throw "WDK NuGet install failed with exit code $LASTEXITCODE" }
+          nuget install Microsoft.Windows.SDK.CPP -Version $sdkVersion -OutputDirectory $nugetDir -Verbosity quiet
+          if ($LASTEXITCODE -ne 0) { throw "SDK NuGet install failed with exit code $LASTEXITCODE" }
 
           $wdkBase = (Get-ChildItem $nugetDir -Directory -Filter 'Microsoft.Windows.WDK*' | Select-Object -First 1).FullName
+          if (-not $wdkBase) { throw "WDK NuGet package directory not found in $nugetDir" }
           $wdkVer = (Get-ChildItem "$wdkBase\c\Include" -Directory | Select-Object -First 1).Name
 
           # Set environment variables so MSBuild's WindowsDriver targets find the WDK.
-          $wdkContentRoot = "$wdkBase\c"
-          Write-Host "WDK content root: $wdkContentRoot (version $wdkVer)"
-          echo "WDKContentRoot=$wdkContentRoot" >> $env:GITHUB_ENV
-          echo "WDKToolRoot=$wdkContentRoot" >> $env:GITHUB_ENV
+          echo "WDKContentRoot=$wdkBase\c" >> $env:GITHUB_ENV
+          echo "WDKToolRoot=$wdkBase\c" >> $env:GITHUB_ENV
+          echo "NUGET_WDK_BASE=$wdkBase" >> $env:GITHUB_ENV
+          echo "NUGET_WDK_VER=$wdkVer" >> $env:GITHUB_ENV
+          Write-Host "WDK content root: $wdkBase\c (version $wdkVer)"
 
-          # The WDK NuGet package expects rc.exe/mc.exe at its x86 bin path but
-          # only ships x64 binaries. Copy the system SDK tools there so MSBuild
-          # finds them.
-          $wdkBinX86 = "$wdkBase\c\bin\$wdkVer\x86"
-          if (-not (Test-Path $wdkBinX86)) {
-            New-Item -ItemType Directory -Path $wdkBinX86 -Force | Out-Null
-          }
-          $sdkBinX86 = "C:\Program Files (x86)\Windows Kits\10\bin\$wdkVer\x86"
-          if (-not (Test-Path $sdkBinX86)) {
-            # Fall back to whatever version is installed
-            $sdkBinX86 = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory | Where-Object { $_.Name -match '^\d+\.' } | Sort-Object Name -Descending | Select-Object -First 1).FullName + "\x86"
-          }
-          foreach ($tool in @('rc.exe','rcdll.dll','mc.exe')) {
-            $src = Join-Path $sdkBinX86 $tool
-            if (Test-Path $src) {
-              Copy-Item $src -Destination $wdkBinX86 -Force
-              Write-Host "Copied $tool to $wdkBinX86"
+          # The WDK NuGet package doesn't ship rc.exe/mc.exe but MSBuild
+          # resolves them relative to the WDK path. Copy from the system SDK.
+          foreach ($arch in @('x86','x64')) {
+            $wdkBin = "$wdkBase\c\bin\$wdkVer\$arch"
+            if (-not (Test-Path $wdkBin)) { New-Item -ItemType Directory -Path $wdkBin -Force | Out-Null }
+            $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\$wdkVer\$arch"
+            if (-not (Test-Path $sdkBin)) {
+              $sdkBin = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
+                Where-Object { $_.Name -match '^\d+\.' } | Sort-Object Name -Descending |
+                Select-Object -First 1).FullName + "\$arch"
             }
-          }
-          # Also copy x64 versions
-          $wdkBinX64 = "$wdkBase\c\bin\$wdkVer\x64"
-          if (-not (Test-Path $wdkBinX64)) {
-            New-Item -ItemType Directory -Path $wdkBinX64 -Force | Out-Null
-          }
-          $sdkBinX64 = $sdkBinX86 -replace '\\x86$','\x64'
-          foreach ($tool in @('rc.exe','rcdll.dll','mc.exe')) {
-            $src = Join-Path $sdkBinX64 $tool
-            if (Test-Path $src) {
-              Copy-Item $src -Destination $wdkBinX64 -Force
-              Write-Host "Copied $tool to $wdkBinX64"
+            foreach ($tool in @('rc.exe','rcdll.dll','mc.exe')) {
+              $src = Join-Path $sdkBin $tool
+              if (Test-Path $src) { Copy-Item $src -Destination $wdkBin -Force }
             }
+            Write-Host "Populated $wdkBin with SDK tools"
           }
 
       - name: Build msquic.sys (kernel-mode)
@@ -117,22 +107,14 @@ jobs:
             throw "msquic source not found at $msquicSrc — was CMake FetchContent run?"
           }
 
-          # Find the system Windows SDK bin path (has rc.exe, mc.exe, etc.)
-          $sdkBinRoot = "C:\Program Files (x86)\Windows Kits\10\bin"
-          $sdkBinVer = (Get-ChildItem $sdkBinRoot -Directory | Where-Object { $_.Name -match '^\d+\.' } | Sort-Object Name -Descending | Select-Object -First 1).Name
-          $sdkBinPath = "$sdkBinRoot\$sdkBinVer\"
-          Write-Host "Windows SDK bin path: $sdkBinPath"
-
           Push-Location $msquicSrc
           try {
             # Restore NuGet packages for the kernel solution.
             msbuild msquic.kernel.sln -t:restore /p:RestorePackagesConfig=true /p:Configuration=${{ inputs.config }} /p:Platform=x64
             if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
 
-            # Build the kernel-mode msquic.sys library.
-            # - Disable code analysis (NuGet WDK analysis plugins don't load reliably)
-            # - Override WindowsSdkVerBinPath so MSBuild uses the system rc.exe/mc.exe
-            #   instead of the NuGet WDK's x86 path which doesn't ship those tools
+            # Build msquic.sys. Code analysis is disabled because the NuGet WDK
+            # analysis plugins don't load reliably on GitHub-hosted runners.
             msbuild msquic.kernel.sln /m `
               /p:Configuration=${{ inputs.config }} `
               /p:Platform=x64 `
@@ -156,13 +138,6 @@ jobs:
           if (-not (Test-Path $kmDir)) { New-Item -ItemType Directory -Path $kmDir -Force | Out-Null }
           Copy-Item -LiteralPath $msquicSys.FullName -Destination (Join-Path $kmDir 'msquic.sys') -Force
           Write-Host "Copied msquic.sys to $kmDir"
-
-      - name: Download WDK NuGet packages
-        shell: pwsh
-        run: |
-          nuget install Microsoft.Windows.WDK.x64 -Version 10.0.26100.6584 -OutputDirectory nuget -Verbosity quiet
-          nuget install Microsoft.Windows.SDK.CPP -Version 10.0.26100.1 -OutputDirectory nuget -Verbosity quiet
-          Write-Host "WDK and SDK NuGet packages downloaded."
 
       - name: Build kernel driver
         shell: pwsh
