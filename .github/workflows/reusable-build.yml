@@ -68,15 +68,12 @@ jobs:
 
           Push-Location $msquicSrc
           try {
-            # Prepare the msquic build environment for kernel mode.
-            & pwsh scripts/prepare-machine.ps1 -ForBuild -ForKernel
-            if ($LASTEXITCODE -ne 0) { throw "prepare-machine.ps1 failed with exit code $LASTEXITCODE" }
-
             # Restore NuGet packages for the kernel solution.
             msbuild msquic.kernel.sln -t:restore /p:RestorePackagesConfig=true /p:Configuration=${{ inputs.config }} /p:Platform=x64
             if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
 
             # Build the kernel-mode msquic.sys library.
+            # The windows-latest runner has WDK 10.0.26100 pre-installed.
             msbuild msquic.kernel.sln /m /p:Configuration=${{ inputs.config }} /p:Platform=x64
             if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
 
