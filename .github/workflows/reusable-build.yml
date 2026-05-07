@@ -80,11 +80,12 @@ jobs:
             msbuild msquic.kernel.sln /m /p:Configuration=${{ inputs.config }} /p:Platform=x64
             if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
 
-            # Locate the built msquic.sys and copy it to the km output directory.
-            $msquicSys = Get-ChildItem -Path artifacts -Recurse -Filter 'msquic.sys' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $msquicSys) {
-              throw "msquic.sys not found in artifacts after kernel build"
+            # Locate the built msquic.sys at its predictable output path.
+            $msquicSysPath = Join-Path $PWD "artifacts/bin/winkernel/x64_${{ inputs.config }}_schannel/msquic.sys"
+            if (-not (Test-Path -LiteralPath $msquicSysPath)) {
+              throw "msquic.sys not found at expected path: $msquicSysPath"
             }
+            $msquicSys = Get-Item -LiteralPath $msquicSysPath
             Write-Host "Built msquic.sys: $($msquicSys.FullName) ($($msquicSys.Length) bytes)"
           } finally {
             Pop-Location
