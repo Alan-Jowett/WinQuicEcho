@@ -55,6 +55,47 @@ jobs:
       - name: Build
         run: cmake --build ${{ inputs.build_dir }} --config ${{ inputs.config }} --parallel
 
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
+
+      - name: Build msquic.sys (kernel-mode)
+        shell: pwsh
+        run: |
+          $msquicSrc = "${{ inputs.build_dir }}/_deps/msquic-src"
+          if (-not (Test-Path $msquicSrc)) {
+            throw "msquic source not found at $msquicSrc — was CMake FetchContent run?"
+          }
+
+          Push-Location $msquicSrc
+          try {
+            # Prepare the msquic build environment for kernel mode.
+            & pwsh scripts/prepare-machine.ps1 -ForBuild -ForKernel
+            if ($LASTEXITCODE -ne 0) { throw "prepare-machine.ps1 failed with exit code $LASTEXITCODE" }
+
+            # Restore NuGet packages for the kernel solution.
+            msbuild msquic.kernel.sln -t:restore /p:RestorePackagesConfig=true /p:Configuration=${{ inputs.config }} /p:Platform=x64
+            if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
+
+            # Build the kernel-mode msquic.sys library.
+            msbuild msquic.kernel.sln /m /p:Configuration=${{ inputs.config }} /p:Platform=x64
+            if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
+
+            # Locate the built msquic.sys and copy it to the km output directory.
+            $msquicSys = Get-ChildItem -Path artifacts -Recurse -Filter 'msquic.sys' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $msquicSys) {
+              throw "msquic.sys not found in artifacts after kernel build"
+            }
+            Write-Host "Built msquic.sys: $($msquicSys.FullName) ($($msquicSys.Length) bytes)"
+          } finally {
+            Pop-Location
+          }
+
+          # Copy msquic.sys into the WinQuicEcho km output directory.
+          $kmDir = "${{ inputs.build_dir }}/km"
+          if (-not (Test-Path $kmDir)) { New-Item -ItemType Directory -Path $kmDir -Force | Out-Null }
+          Copy-Item -LiteralPath $msquicSys.FullName -Destination (Join-Path $kmDir 'msquic.sys') -Force
+          Write-Host "Copied msquic.sys to $kmDir"
+
       - name: Download WDK NuGet packages
         shell: pwsh
         run: |
@@ -131,3 +172,4 @@ jobs:
           path: |
             ${{ inputs.build_dir }}/${{ inputs.config }}
             ${{ inputs.build_dir }}/km/winquicecho_km.sys
+            ${{ inputs.build_dir }}/km/msquic.sys
