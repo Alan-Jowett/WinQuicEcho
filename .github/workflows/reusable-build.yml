@@ -91,7 +91,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
 
             # Build the kernel-mode msquic.sys library.
-            msbuild msquic.kernel.sln /m /p:Configuration=${{ inputs.config }} /p:Platform=x64
+            # Disable code analysis — the NuGet WDK analysis plugins don't load
+            # reliably and we only need the binary, not analysis results.
+            msbuild msquic.kernel.sln /m /p:Configuration=${{ inputs.config }} /p:Platform=x64 /p:RunCodeAnalysis=false /p:CodeAnalysisTreatWarningsAsErrors=false
             if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
 
             # Locate the built msquic.sys at its predictable output path.
