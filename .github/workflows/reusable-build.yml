@@ -76,6 +76,16 @@ jobs:
           echo "WDKContentRoot=$wdkContentRoot" >> $env:GITHUB_ENV
           echo "WDKToolRoot=$wdkContentRoot" >> $env:GITHUB_ENV
 
+          # Point rc.exe at the system Windows SDK bin directory so the linker
+          # doesn't try to use the NuGet WDK's x86 rc.exe which doesn't exist.
+          $sdkBinPath = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\"
+          if (-not (Test-Path $sdkBinPath)) {
+            # Fall back to whatever SDK version is installed
+            $sdkBinPath = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName + "\"
+          }
+          Write-Host "Windows SDK bin path: $sdkBinPath"
+          echo "WindowsSdkVerBinPath=$sdkBinPath" >> $env:GITHUB_ENV
+
       - name: Build msquic.sys (kernel-mode)
         shell: pwsh
         run: |
