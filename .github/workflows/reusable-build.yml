@@ -94,6 +94,12 @@ jobs:
             throw "msquic source not found at $msquicSrc — was CMake FetchContent run?"
           }
 
+          # Find the system Windows SDK bin path (has rc.exe, mc.exe, etc.)
+          $sdkBinRoot = "C:\Program Files (x86)\Windows Kits\10\bin"
+          $sdkBinVer = (Get-ChildItem $sdkBinRoot -Directory | Where-Object { $_.Name -match '^\d+\.' } | Sort-Object Name -Descending | Select-Object -First 1).Name
+          $sdkBinPath = "$sdkBinRoot\$sdkBinVer\"
+          Write-Host "Windows SDK bin path: $sdkBinPath"
+
           Push-Location $msquicSrc
           try {
             # Restore NuGet packages for the kernel solution.
@@ -101,9 +107,15 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
 
             # Build the kernel-mode msquic.sys library.
-            # Disable code analysis — the NuGet WDK analysis plugins don't load
-            # reliably and we only need the binary, not analysis results.
-            msbuild msquic.kernel.sln /m /p:Configuration=${{ inputs.config }} /p:Platform=x64 /p:RunCodeAnalysis=false /p:CodeAnalysisTreatWarningsAsErrors=false
+            # - Disable code analysis (NuGet WDK analysis plugins don't load reliably)
+            # - Override WindowsSdkVerBinPath so MSBuild uses the system rc.exe/mc.exe
+            #   instead of the NuGet WDK's x86 path which doesn't ship those tools
+            msbuild msquic.kernel.sln /m `
+              /p:Configuration=${{ inputs.config }} `
+              /p:Platform=x64 `
+              /p:RunCodeAnalysis=false `
+              /p:CodeAnalysisTreatWarningsAsErrors=false `
+              "/p:WindowsSdkVerBinPath=$sdkBinPath"
             if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
 
             # Locate the built msquic.sys at its predictable output path.
