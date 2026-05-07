@@ -92,9 +92,15 @@ jobs:
                 Where-Object { $_.Name -match '^\d+\.' } | Sort-Object Name -Descending |
                 Select-Object -First 1).FullName + "\$arch"
             }
+            if (-not (Test-Path $sdkBin)) {
+              throw "Windows SDK bin directory not found for $arch (tried $sdkBin)"
+            }
             foreach ($tool in @('rc.exe','rcdll.dll','mc.exe')) {
               $src = Join-Path $sdkBin $tool
-              if (Test-Path $src) { Copy-Item $src -Destination $wdkBin -Force }
+              if (-not (Test-Path $src)) {
+                throw "Required SDK tool not found: $src"
+              }
+              Copy-Item $src -Destination $wdkBin -Force
             }
             Write-Host "Populated $wdkBin with SDK tools"
           }
