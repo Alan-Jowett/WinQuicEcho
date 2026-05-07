@@ -58,6 +58,24 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
 
+      - name: Install Windows WDK
+        shell: pwsh
+        run: |
+          # The runner has the WDK VS extension but not the full WDK headers.
+          # Download and install the WDK NuGet content for MSBuild kernel builds.
+          $wdkVersion = '10.0.26100.6584'
+          $nugetDir = 'nuget'
+          nuget install Microsoft.Windows.WDK.x64 -Version $wdkVersion -OutputDirectory $nugetDir -Verbosity quiet
+
+          $wdkBase = (Get-ChildItem $nugetDir -Directory -Filter 'Microsoft.Windows.WDK*' | Select-Object -First 1).FullName
+          $wdkVer = (Get-ChildItem "$wdkBase\c\Include" -Directory | Select-Object -First 1).Name
+
+          # Set environment variables so MSBuild's WindowsDriver targets find the WDK.
+          $wdkContentRoot = "$wdkBase\c"
+          Write-Host "WDK content root: $wdkContentRoot (version $wdkVer)"
+          echo "WDKContentRoot=$wdkContentRoot" >> $env:GITHUB_ENV
+          echo "WDKToolRoot=$wdkContentRoot" >> $env:GITHUB_ENV
+
       - name: Build msquic.sys (kernel-mode)
         shell: pwsh
         run: |
@@ -73,7 +91,6 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
 
             # Build the kernel-mode msquic.sys library.
-            # The windows-latest runner has WDK 10.0.26100 pre-installed.
             msbuild msquic.kernel.sln /m /p:Configuration=${{ inputs.config }} /p:Platform=x64
             if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
 
