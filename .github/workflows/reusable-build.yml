@@ -55,12 +55,95 @@ jobs:
       - name: Build
         run: cmake --build ${{ inputs.build_dir }} --config ${{ inputs.config }} --parallel
 
-      - name: Download WDK NuGet packages
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
+
+      - name: Download WDK and SDK NuGet packages
         shell: pwsh
         run: |
-          nuget install Microsoft.Windows.WDK.x64 -Version 10.0.26100.6584 -OutputDirectory nuget -Verbosity quiet
-          nuget install Microsoft.Windows.SDK.CPP -Version 10.0.26100.1 -OutputDirectory nuget -Verbosity quiet
-          Write-Host "WDK and SDK NuGet packages downloaded."
+          $wdkVersion = '10.0.26100.6584'
+          $sdkVersion = '10.0.26100.1'
+          $nugetDir = 'nuget'
+
+          nuget install Microsoft.Windows.WDK.x64 -Version $wdkVersion -OutputDirectory $nugetDir -Verbosity quiet
+          if ($LASTEXITCODE -ne 0) { throw "WDK NuGet install failed with exit code $LASTEXITCODE" }
+          nuget install Microsoft.Windows.SDK.CPP -Version $sdkVersion -OutputDirectory $nugetDir -Verbosity quiet
+          if ($LASTEXITCODE -ne 0) { throw "SDK NuGet install failed with exit code $LASTEXITCODE" }
+
+          $wdkBase = (Get-ChildItem $nugetDir -Directory -Filter 'Microsoft.Windows.WDK*' | Select-Object -First 1).FullName
+          if (-not $wdkBase) { throw "WDK NuGet package directory not found in $nugetDir" }
+          $wdkVer = (Get-ChildItem "$wdkBase\c\Include" -Directory | Select-Object -First 1).Name
+
+          # Set environment variables so MSBuild's WindowsDriver targets find the WDK.
+          echo "WDKContentRoot=$wdkBase\c" >> $env:GITHUB_ENV
+          echo "WDKToolRoot=$wdkBase\c" >> $env:GITHUB_ENV
+          echo "NUGET_WDK_BASE=$wdkBase" >> $env:GITHUB_ENV
+          echo "NUGET_WDK_VER=$wdkVer" >> $env:GITHUB_ENV
+          Write-Host "WDK content root: $wdkBase\c (version $wdkVer)"
+
+          # The WDK NuGet package doesn't ship rc.exe/mc.exe but MSBuild
+          # resolves them relative to the WDK path. Copy from the system SDK.
+          foreach ($arch in @('x86','x64')) {
+            $wdkBin = "$wdkBase\c\bin\$wdkVer\$arch"
+            if (-not (Test-Path $wdkBin)) { New-Item -ItemType Directory -Path $wdkBin -Force | Out-Null }
+            $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\$wdkVer\$arch"
+            if (-not (Test-Path $sdkBin)) {
+              $sdkBin = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
+                Where-Object { $_.Name -match '^\d+\.' } | Sort-Object Name -Descending |
+                Select-Object -First 1).FullName + "\$arch"
+            }
+            if (-not (Test-Path $sdkBin)) {
+              throw "Windows SDK bin directory not found for $arch (tried $sdkBin)"
+            }
+            foreach ($tool in @('rc.exe','rcdll.dll','mc.exe')) {
+              $src = Join-Path $sdkBin $tool
+              if (-not (Test-Path $src)) {
+                throw "Required SDK tool not found: $src"
+              }
+              Copy-Item $src -Destination $wdkBin -Force
+            }
+            Write-Host "Populated $wdkBin with SDK tools"
+          }
+
+      - name: Build msquic.sys (kernel-mode)
+        shell: pwsh
+        run: |
+          $msquicSrc = "${{ inputs.build_dir }}/_deps/msquic-src"
+          if (-not (Test-Path $msquicSrc)) {
+            throw "msquic source not found at $msquicSrc — was CMake FetchContent run?"
+          }
+
+          Push-Location $msquicSrc
+          try {
+            # Restore NuGet packages for the kernel solution.
+            msbuild msquic.kernel.sln -t:restore /p:RestorePackagesConfig=true /p:Configuration=${{ inputs.config }} /p:Platform=x64
+            if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
+
+            # Build msquic.sys. Code analysis is disabled because the NuGet WDK
+            # analysis plugins don't load reliably on GitHub-hosted runners.
+            msbuild msquic.kernel.sln /m `
+              /p:Configuration=${{ inputs.config }} `
+              /p:Platform=x64 `
+              /p:RunCodeAnalysis=false `
+              /p:CodeAnalysisTreatWarningsAsErrors=false
+            if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
+
+            # Locate the built msquic.sys at its predictable output path.
+            $msquicSysPath = Join-Path $PWD "artifacts/bin/winkernel/x64_${{ inputs.config }}_schannel/msquic.sys"
+            if (-not (Test-Path -LiteralPath $msquicSysPath)) {
+              throw "msquic.sys not found at expected path: $msquicSysPath"
+            }
+            $msquicSys = Get-Item -LiteralPath $msquicSysPath
+            Write-Host "Built msquic.sys: $($msquicSys.FullName) ($($msquicSys.Length) bytes)"
+          } finally {
+            Pop-Location
+          }
+
+          # Copy msquic.sys into the WinQuicEcho km output directory.
+          $kmDir = "${{ inputs.build_dir }}/km"
+          if (-not (Test-Path $kmDir)) { New-Item -ItemType Directory -Path $kmDir -Force | Out-Null }
+          Copy-Item -LiteralPath $msquicSys.FullName -Destination (Join-Path $kmDir 'msquic.sys') -Force
+          Write-Host "Copied msquic.sys to $kmDir"
 
       - name: Build kernel driver
         shell: pwsh
@@ -131,3 +214,4 @@ jobs:
           path: |
             ${{ inputs.build_dir }}/${{ inputs.config }}
             ${{ inputs.build_dir }}/km/winquicecho_km.sys
+            ${{ inputs.build_dir }}/km/msquic.sys
