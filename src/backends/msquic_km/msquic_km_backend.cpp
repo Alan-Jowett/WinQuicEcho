@@ -90,7 +90,7 @@ class km_device {
                        " quic_status=0x" +
                        ([&]{
                            char buf[16];
-                           snprintf(buf, sizeof(buf), "%x", result.QuicStatus);
+                           std::snprintf(buf, sizeof(buf), "%x", result.QuicStatus);
                            return std::string(buf);
                        })();
             }
