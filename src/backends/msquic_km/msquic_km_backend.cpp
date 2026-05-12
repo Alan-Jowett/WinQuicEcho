@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -65,19 +66,35 @@ class km_device {
 
     void start_server(const WINQUICECHO_SERVER_CONFIG& config) const {
         DWORD bytes_returned = 0;
+        WINQUICECHO_START_RESULT result = {};
         BOOL ok = DeviceIoControl(
             handle_,
             IOCTL_WINQUICECHO_START_SERVER,
             const_cast<WINQUICECHO_SERVER_CONFIG*>(&config),
             sizeof(config),
-            nullptr, 0,
+            &result, sizeof(result),
             &bytes_returned,
             nullptr);
         if (!ok) {
             const DWORD err = GetLastError();
-            throw std::runtime_error(
-                "IOCTL_WINQUICECHO_START_SERVER failed (error=" +
-                std::to_string(err) + ")");
+            static const char* step_names[] = {
+                "unknown", "MsQuicOpen2", "RegistrationOpen",
+                "ConfigurationOpen", "ConfigurationLoadCredential",
+                "ListenerOpen", "ListenerStart"
+            };
+            std::string msg = "IOCTL_WINQUICECHO_START_SERVER failed (error=" +
+                std::to_string(err) + ")";
+            if (bytes_returned >= sizeof(result) && result.FailedStep > 0 &&
+                result.FailedStep <= 6) {
+                msg += " step=" + std::string(step_names[result.FailedStep]) +
+                       " quic_status=0x" +
+                       ([&]{
+                           char buf[16];
+                           snprintf(buf, sizeof(buf), "%x", result.QuicStatus);
+                           return std::string(buf);
+                       })();
+            }
+            throw std::runtime_error(msg);
         }
     }
 

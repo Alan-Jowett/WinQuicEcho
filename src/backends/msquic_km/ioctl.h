@@ -57,4 +57,13 @@ typedef struct _WINQUICECHO_SERVER_STATS {
     BOOLEAN Running;
 } WINQUICECHO_SERVER_STATS;
 
+// Optional output for IOCTL_WINQUICECHO_START_SERVER on failure.
+// If the output buffer is large enough, the driver fills in diagnostic info.
+typedef struct _WINQUICECHO_START_RESULT {
+    UINT32 FailedStep;      // 0=none, 1=MsQuicOpen2, 2=RegistrationOpen,
+                            // 3=ConfigurationOpen, 4=ConfigurationLoadCredential,
+                            // 5=ListenerOpen, 6=ListenerStart
+    UINT32 QuicStatus;      // QUIC_STATUS from the failing call
+} WINQUICECHO_START_RESULT;
+
 #pragma pack(pop)
