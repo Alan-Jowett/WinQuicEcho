@@ -83,14 +83,14 @@ class km_device {
                 "ListenerOpen", "ListenerStart"
             };
             std::string msg = "IOCTL_WINQUICECHO_START_SERVER failed (error=" +
-                std::to_string(err) + ")";
-            if (bytes_returned >= sizeof(result) && result.FailedStep > 0 &&
-                result.FailedStep <= 6) {
+                std::to_string(err) + " bytes_returned=" +
+                std::to_string(bytes_returned) + ")";
+            if (result.FailedStep > 0 && result.FailedStep <= 6) {
                 msg += " step=" + std::string(step_names[result.FailedStep]) +
                        " quic_status=0x" +
                        ([&]{
                            char buf[16];
-                           snprintf(buf, sizeof(buf), "%x", result.QuicStatus);
+                           std::snprintf(buf, sizeof(buf), "%x", result.QuicStatus);
                            return std::string(buf);
                        })();
             }
