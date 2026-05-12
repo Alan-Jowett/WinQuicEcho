@@ -46,7 +46,8 @@ jobs:
             (Join-Path $binDir "echo_server.exe"),
             (Join-Path $binDir "echo_client.exe"),
             (Join-Path $binDir "msquic.dll"),
-            (Join-Path $kmDir  "winquicecho_km.sys")
+            (Join-Path $kmDir  "winquicecho_km.sys"),
+            (Join-Path $kmDir  "msquicpriv.sys")
           )) {
             if (-not (Test-Path $f)) {
               Write-Error "Missing: $f"
@@ -55,21 +56,7 @@ jobs:
           }
           Write-Host "All binaries present (user-mode + kernel driver)."
 
-      - name: Check kernel-mode prerequisites
-        id: km-prereqs
-        shell: pwsh
-        run: |
-          $skip = $false
-
-          if (-not (Test-Path "$env:SystemRoot\System32\drivers\msquic.sys")) {
-            Write-Warning "msquic.sys not found — cannot run kernel-mode test."
-            $skip = $true
-          }
-
-          "skip=$($skip.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
       - name: Sign and install kernel driver
-        if: steps.km-prereqs.outputs.skip != 'true'
         id: driver-install
         shell: pwsh
         run: |
@@ -102,9 +89,30 @@ jobs:
           & $signtool.FullName sign /v /fd sha256 /sm /s My /n "WinQuicEcho CI Test" $driverPath
           if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
 
-          # Install and start the driver.
+          # Install msquicpriv.sys as a side-by-side kernel service.
+          # Clean up stale services from prior runs on reused runners.
+          $msquicPrivPath = "./downloaded_build/km/msquicpriv.sys"
+          Copy-Item $msquicPrivPath $env:SystemRoot\System32\drivers\msquicpriv.sys -Force
+          sc.exe stop msquicpriv 2>$null | Out-Null
+          sc.exe delete msquicpriv 2>$null | Out-Null
+          sc.exe create msquicpriv type= kernel binPath= "$env:SystemRoot\System32\drivers\msquicpriv.sys" start= demand
+          if ($LASTEXITCODE -ne 0) { throw "sc create msquicpriv failed ($LASTEXITCODE)" }
+          $msquicStart = sc.exe start msquicpriv 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Failed to start msquicpriv: $msquicStart"
+            Write-Warning "Skipping kernel-mode test (msquicpriv driver could not be loaded)."
+            "driver_loaded=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+          sc.exe query msquicpriv
+          Write-Host "msquicpriv driver loaded."
+
+          # Install and start the WinQuicEcho driver (depends on msquicpriv).
           Copy-Item $driverPath $env:SystemRoot\System32\drivers\winquicecho_km.sys -Force
-          sc.exe create WinQuicEcho type= kernel binPath= "$env:SystemRoot\System32\drivers\winquicecho_km.sys" start= demand depend= msquic
+          sc.exe stop WinQuicEcho 2>$null | Out-Null
+          sc.exe delete WinQuicEcho 2>$null | Out-Null
+          sc.exe create WinQuicEcho type= kernel binPath= "$env:SystemRoot\System32\drivers\winquicecho_km.sys" start= demand depend= msquicpriv
+          if ($LASTEXITCODE -ne 0) { throw "sc create WinQuicEcho failed ($LASTEXITCODE)" }
           $startResult = sc.exe start WinQuicEcho 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {
             Write-Warning "Failed to start driver: $startResult"
@@ -117,7 +125,7 @@ jobs:
           }
 
       - name: Echo roundtrip integration test (kernel mode)
-        if: steps.km-prereqs.outputs.skip != 'true' && steps.driver-install.outputs.driver_loaded == 'true'
+        if: steps.driver-install.outputs.driver_loaded == 'true'
         shell: pwsh
         run: |
           & ./tests/integration/echo-roundtrip.ps1 `
@@ -132,10 +140,13 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          # Stop and remove driver service.
+          # Stop and remove driver services.
           sc.exe stop WinQuicEcho 2>$null
           sc.exe delete WinQuicEcho 2>$null
           Remove-Item "$env:SystemRoot\System32\drivers\winquicecho_km.sys" -Force -ErrorAction SilentlyContinue
+          sc.exe stop msquicpriv 2>$null
+          sc.exe delete msquicpriv 2>$null
+          Remove-Item "$env:SystemRoot\System32\drivers\msquicpriv.sys" -Force -ErrorAction SilentlyContinue
 
           # Remove code signing certificate from all stores.
           if ($env:CODESIGN_THUMBPRINT) {
