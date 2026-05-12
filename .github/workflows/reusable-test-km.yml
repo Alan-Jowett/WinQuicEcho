@@ -56,17 +56,7 @@ jobs:
           }
           Write-Host "All binaries present (user-mode + kernel driver)."
 
-      - name: Check kernel-mode prerequisites
-        id: km-prereqs
-        shell: pwsh
-        run: |
-          $skip = $false
-          # msquicpriv.sys is built from source and included in the artifact,
-          # so no inbox driver prerequisite is needed.
-          "skip=$($skip.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
       - name: Sign and install kernel driver
-        if: steps.km-prereqs.outputs.skip != 'true'
         id: driver-install
         shell: pwsh
         run: |
@@ -100,9 +90,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
 
           # Install msquicpriv.sys as a side-by-side kernel service.
+          # Clean up stale services from prior runs on reused runners.
           $msquicPrivPath = "./downloaded_build/km/msquicpriv.sys"
           Copy-Item $msquicPrivPath $env:SystemRoot\System32\drivers\msquicpriv.sys -Force
+          sc.exe stop msquicpriv 2>$null | Out-Null
+          sc.exe delete msquicpriv 2>$null | Out-Null
           sc.exe create msquicpriv type= kernel binPath= "$env:SystemRoot\System32\drivers\msquicpriv.sys" start= demand
+          if ($LASTEXITCODE -ne 0) { throw "sc create msquicpriv failed ($LASTEXITCODE)" }
           $msquicStart = sc.exe start msquicpriv 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {
             Write-Warning "Failed to start msquicpriv: $msquicStart"
@@ -115,7 +109,10 @@ jobs:
 
           # Install and start the WinQuicEcho driver (depends on msquicpriv).
           Copy-Item $driverPath $env:SystemRoot\System32\drivers\winquicecho_km.sys -Force
+          sc.exe stop WinQuicEcho 2>$null | Out-Null
+          sc.exe delete WinQuicEcho 2>$null | Out-Null
           sc.exe create WinQuicEcho type= kernel binPath= "$env:SystemRoot\System32\drivers\winquicecho_km.sys" start= demand depend= msquicpriv
+          if ($LASTEXITCODE -ne 0) { throw "sc create WinQuicEcho failed ($LASTEXITCODE)" }
           $startResult = sc.exe start WinQuicEcho 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {
             Write-Warning "Failed to start driver: $startResult"
@@ -128,7 +125,7 @@ jobs:
           }
 
       - name: Echo roundtrip integration test (kernel mode)
-        if: steps.km-prereqs.outputs.skip != 'true' && steps.driver-install.outputs.driver_loaded == 'true'
+        if: steps.driver-install.outputs.driver_loaded == 'true'
         shell: pwsh
         run: |
           & ./tests/integration/echo-roundtrip.ps1 `
