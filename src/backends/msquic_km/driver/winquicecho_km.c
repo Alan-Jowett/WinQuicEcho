@@ -538,14 +538,15 @@ DeviceIoControlHandler(
         Config->Alpn[sizeof(Config->Alpn) - 1]         = '\0';
         Config->CertStore[sizeof(Config->CertStore) - 1] = '\0';
 
-        // If output buffer is large enough, provide diagnostic info on failure.
-        WINQUICECHO_START_RESULT* Result = NULL;
-        if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength >=
+        // Use a local result struct to avoid aliasing with the input buffer
+        // (METHOD_BUFFERED shares SystemBuffer for input and output).
+        WINQUICECHO_START_RESULT LocalResult = {0};
+        Status = StartEchoServer(Config, &LocalResult);
+        if (!NT_SUCCESS(Status) &&
+            IrpSp->Parameters.DeviceIoControl.OutputBufferLength >=
                 sizeof(WINQUICECHO_START_RESULT)) {
-            Result = (WINQUICECHO_START_RESULT*)Irp->AssociatedIrp.SystemBuffer;
-        }
-        Status = StartEchoServer(Config, Result);
-        if (!NT_SUCCESS(Status) && Result != NULL) {
+            RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,
+                          &LocalResult, sizeof(LocalResult));
             BytesReturned = sizeof(WINQUICECHO_START_RESULT);
         }
         break;
