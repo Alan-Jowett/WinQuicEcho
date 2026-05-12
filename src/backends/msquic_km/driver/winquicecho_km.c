@@ -545,9 +545,13 @@ DeviceIoControlHandler(
         if (!NT_SUCCESS(Status) &&
             IrpSp->Parameters.DeviceIoControl.OutputBufferLength >=
                 sizeof(WINQUICECHO_START_RESULT)) {
+            // Return STATUS_SUCCESS so the I/O manager copies the output
+            // buffer back to user-mode. User-mode detects the failure via
+            // FailedStep > 0.
             RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,
                           &LocalResult, sizeof(LocalResult));
             BytesReturned = sizeof(WINQUICECHO_START_RESULT);
+            Status = STATUS_SUCCESS;
         }
         break;
     }
