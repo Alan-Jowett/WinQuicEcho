@@ -139,11 +139,12 @@ jobs:
             Pop-Location
           }
 
-          # Copy msquic.sys into the WinQuicEcho km output directory.
+          # Copy msquic.sys into the WinQuicEcho km output directory as msquicpriv.sys
+          # for side-by-side installation alongside the inbox msquic.sys.
           $kmDir = "${{ inputs.build_dir }}/km"
           if (-not (Test-Path $kmDir)) { New-Item -ItemType Directory -Path $kmDir -Force | Out-Null }
-          Copy-Item -LiteralPath $msquicSys.FullName -Destination (Join-Path $kmDir 'msquic.sys') -Force
-          Write-Host "Copied msquic.sys to $kmDir"
+          Copy-Item -LiteralPath $msquicSys.FullName -Destination (Join-Path $kmDir 'msquicpriv.sys') -Force
+          Write-Host "Copied msquic.sys -> msquicpriv.sys in $kmDir"
 
       - name: Build kernel driver
         shell: pwsh
@@ -181,7 +182,9 @@ jobs:
           New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
           # Generate kernel-mode import library from .def file.
-          $defContent = "LIBRARY msquic.sys`r`nEXPORTS`r`n    MsQuicOpenVersion`r`n    MsQuicClose"
+          # Use msquicpriv.sys so we can install side-by-side with the inbox
+          # msquic.sys without disturbing system services that depend on it.
+          $defContent = "LIBRARY msquicpriv.sys`r`nEXPORTS`r`n    MsQuicOpenVersion`r`n    MsQuicClose"
           $defContent | Out-File -FilePath "$outDir\msquic_km.def" -Encoding ascii
           & $lib /nologo /def:"$outDir\msquic_km.def" /out:"$outDir\msquic.lib" /machine:x64
           if ($LASTEXITCODE -ne 0) { throw "lib.exe failed with exit code $LASTEXITCODE" }
@@ -214,4 +217,4 @@ jobs:
           path: |
             ${{ inputs.build_dir }}/${{ inputs.config }}
             ${{ inputs.build_dir }}/km/winquicecho_km.sys
-            ${{ inputs.build_dir }}/km/msquic.sys
+            ${{ inputs.build_dir }}/km/msquicpriv.sys
