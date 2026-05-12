@@ -26,7 +26,8 @@ DRIVER_DISPATCH DeviceCreateClose;
 _Dispatch_type_(IRP_MJ_DEVICE_CONTROL)
 DRIVER_DISPATCH DeviceIoControlHandler;
 
-static NTSTATUS StartEchoServer(_In_ const WINQUICECHO_SERVER_CONFIG* Config);
+static NTSTATUS StartEchoServer(_In_ const WINQUICECHO_SERVER_CONFIG* Config,
+                               _Out_opt_ WINQUICECHO_START_RESULT* Result);
 static void     StopEchoServer(void);
 
 // -----------------------------------------------------------------------
@@ -281,10 +282,16 @@ ServerListenerCallback(
 static
 NTSTATUS
 StartEchoServer(
-    _In_ const WINQUICECHO_SERVER_CONFIG* Config)
+    _In_ const WINQUICECHO_SERVER_CONFIG* Config,
+    _Out_opt_ WINQUICECHO_START_RESULT* Result)
 {
     QUIC_STATUS QStatus;
     NTSTATUS NtStatus = STATUS_SUCCESS;
+
+    if (Result) {
+        Result->FailedStep = 0;
+        Result->QuicStatus = 0;
+    }
 
     ExAcquireFastMutex(&g_Server.Lock);
 
@@ -304,11 +311,12 @@ StartEchoServer(
     g_Server.Configuration     = NULL;
     g_Server.Listener          = NULL;
 
-    // Open MsQuic kernel API (exported by msquic.sys).
+    // Open MsQuic kernel API (exported by msquicpriv.sys).
     QStatus = MsQuicOpen2(&g_Server.MsQuic);
     if (QUIC_FAILED(QStatus)) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
                    "WinQuicEcho: MsQuicOpen2 failed 0x%x\n", QStatus);
+        if (Result) { Result->FailedStep = 1; Result->QuicStatus = QStatus; }
         NtStatus = STATUS_UNSUCCESSFUL;
         goto Exit;
     }
@@ -321,6 +329,7 @@ StartEchoServer(
     if (QUIC_FAILED(QStatus)) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
                    "WinQuicEcho: RegistrationOpen failed 0x%x\n", QStatus);
+        if (Result) { Result->FailedStep = 2; Result->QuicStatus = QStatus; }
         NtStatus = STATUS_UNSUCCESSFUL;
         goto Exit;
     }
@@ -345,6 +354,7 @@ StartEchoServer(
     if (QUIC_FAILED(QStatus)) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
                    "WinQuicEcho: ConfigurationOpen failed 0x%x\n", QStatus);
+        if (Result) { Result->FailedStep = 3; Result->QuicStatus = QStatus; }
         NtStatus = STATUS_UNSUCCESSFUL;
         goto Exit;
     }
@@ -365,6 +375,7 @@ StartEchoServer(
     if (QUIC_FAILED(QStatus)) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
                    "WinQuicEcho: ConfigurationLoadCredential failed 0x%x\n", QStatus);
+        if (Result) { Result->FailedStep = 4; Result->QuicStatus = QStatus; }
         NtStatus = STATUS_UNSUCCESSFUL;
         goto Exit;
     }
@@ -375,6 +386,7 @@ StartEchoServer(
     if (QUIC_FAILED(QStatus)) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
                    "WinQuicEcho: ListenerOpen failed 0x%x\n", QStatus);
+        if (Result) { Result->FailedStep = 5; Result->QuicStatus = QStatus; }
         NtStatus = STATUS_UNSUCCESSFUL;
         goto Exit;
     }
@@ -388,6 +400,7 @@ StartEchoServer(
     if (QUIC_FAILED(QStatus)) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
                    "WinQuicEcho: ListenerStart failed 0x%x\n", QStatus);
+        if (Result) { Result->FailedStep = 6; Result->QuicStatus = QStatus; }
         NtStatus = STATUS_UNSUCCESSFUL;
         goto Exit;
     }
@@ -524,7 +537,17 @@ DeviceIoControlHandler(
         // Ensure null termination of string fields.
         Config->Alpn[sizeof(Config->Alpn) - 1]         = '\0';
         Config->CertStore[sizeof(Config->CertStore) - 1] = '\0';
-        Status = StartEchoServer(Config);
+
+        // If output buffer is large enough, provide diagnostic info on failure.
+        WINQUICECHO_START_RESULT* Result = NULL;
+        if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength >=
+                sizeof(WINQUICECHO_START_RESULT)) {
+            Result = (WINQUICECHO_START_RESULT*)Irp->AssociatedIrp.SystemBuffer;
+        }
+        Status = StartEchoServer(Config, Result);
+        if (!NT_SUCCESS(Status) && Result != NULL) {
+            BytesReturned = sizeof(WINQUICECHO_START_RESULT);
+        }
         break;
     }
 
