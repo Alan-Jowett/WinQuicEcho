@@ -75,24 +75,28 @@ class km_device {
             &result, sizeof(result),
             &bytes_returned,
             nullptr);
-        if (!ok) {
-            const DWORD err = GetLastError();
+
+        // The driver returns STATUS_SUCCESS with FailedStep > 0 when it has
+        // diagnostic output (METHOD_BUFFERED only copies output on success).
+        // Also handle the legacy path where DeviceIoControl returns FALSE.
+        bool failed = !ok || (bytes_returned >= sizeof(result) && result.FailedStep > 0);
+        if (failed) {
+            const DWORD err = ok ? 0 : GetLastError();
             static const char* step_names[] = {
                 "unknown", "MsQuicOpen2", "RegistrationOpen",
                 "ConfigurationOpen", "ConfigurationLoadCredential",
                 "ListenerOpen", "ListenerStart"
             };
-            std::string msg = "IOCTL_WINQUICECHO_START_SERVER failed (error=" +
-                std::to_string(err) + " bytes_returned=" +
-                std::to_string(bytes_returned) + ")";
-            if (result.FailedStep > 0 && result.FailedStep <= 6) {
+            std::string msg = "IOCTL_WINQUICECHO_START_SERVER failed";
+            if (!ok) {
+                msg += " (error=" + std::to_string(err) + ")";
+            }
+            if (bytes_returned >= sizeof(result) && result.FailedStep > 0 &&
+                result.FailedStep <= 6) {
+                char hex[16];
+                std::snprintf(hex, sizeof(hex), "%x", result.QuicStatus);
                 msg += " step=" + std::string(step_names[result.FailedStep]) +
-                       " quic_status=0x" +
-                       ([&]{
-                           char buf[16];
-                           std::snprintf(buf, sizeof(buf), "%x", result.QuicStatus);
-                           return std::string(buf);
-                       })();
+                       " quic_status=0x" + hex;
             }
             throw std::runtime_error(msg);
         }

@@ -543,11 +543,17 @@ DeviceIoControlHandler(
         WINQUICECHO_START_RESULT LocalResult = {0};
         Status = StartEchoServer(Config, &LocalResult);
         if (!NT_SUCCESS(Status) &&
+            LocalResult.FailedStep > 0 &&
             IrpSp->Parameters.DeviceIoControl.OutputBufferLength >=
                 sizeof(WINQUICECHO_START_RESULT)) {
+            // Return STATUS_SUCCESS so the I/O manager copies the output
+            // buffer back to user-mode. Only do this when we have actual
+            // diagnostic info (FailedStep > 0) to avoid masking errors
+            // like STATUS_ALREADY_REGISTERED that don't set FailedStep.
             RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,
                           &LocalResult, sizeof(LocalResult));
             BytesReturned = sizeof(WINQUICECHO_START_RESULT);
+            Status = STATUS_SUCCESS;
         }
         break;
     }

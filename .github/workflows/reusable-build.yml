@@ -105,7 +105,7 @@ jobs:
             Write-Host "Populated $wdkBin with SDK tools"
           }
 
-      - name: Build msquic.sys (kernel-mode)
+      - name: Build msquicpriv.sys (kernel-mode)
         shell: pwsh
         run: |
           $msquicSrc = "${{ inputs.build_dir }}/_deps/msquic-src"
@@ -119,8 +119,9 @@ jobs:
             msbuild msquic.kernel.sln -t:restore /p:RestorePackagesConfig=true /p:Configuration=${{ inputs.config }} /p:Platform=x64
             if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
 
-            # Build msquic.sys. Code analysis is disabled because the NuGet WDK
-            # analysis plugins don't load reliably on GitHub-hosted runners.
+            # Build the kernel solution. This produces both msquic.sys (inbox-
+            # compatible) and msquicpriv.sys (private/test driver).  We use
+            # msquicpriv.sys for side-by-side installation.
             msbuild msquic.kernel.sln /m `
               /p:Configuration=${{ inputs.config }} `
               /p:Platform=x64 `
@@ -128,23 +129,30 @@ jobs:
               /p:CodeAnalysisTreatWarningsAsErrors=false
             if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
 
-            # Locate the built msquic.sys at its predictable output path.
-            $msquicSysPath = Join-Path $PWD "artifacts/bin/winkernel/x64_${{ inputs.config }}_schannel/msquic.sys"
-            if (-not (Test-Path -LiteralPath $msquicSysPath)) {
-              throw "msquic.sys not found at expected path: $msquicSysPath"
+            # Use msquicpriv.sys — the private test driver that the msquic team
+            # uses for JIT kernel-mode testing. Unlike msquic.sys (which mirrors
+            # the inbox driver), msquicpriv.sys is designed for side-by-side
+            # installation and exports the same API surface.
+            $msquicPrivPath = Join-Path $PWD "artifacts/bin/winkernel/x64_${{ inputs.config }}_schannel/msquicpriv.sys"
+            if (-not (Test-Path -LiteralPath $msquicPrivPath)) {
+              # Fall back to msquic.sys if msquicpriv.sys wasn't built
+              $msquicPrivPath = Join-Path $PWD "artifacts/bin/winkernel/x64_${{ inputs.config }}_schannel/msquic.sys"
+              if (-not (Test-Path -LiteralPath $msquicPrivPath)) {
+                throw "Neither msquicpriv.sys nor msquic.sys found in kernel build output"
+              }
+              Write-Host "WARNING: msquicpriv.sys not found, falling back to msquic.sys"
             }
-            $msquicSys = Get-Item -LiteralPath $msquicSysPath
-            Write-Host "Built msquic.sys: $($msquicSys.FullName) ($($msquicSys.Length) bytes)"
+            $msquicPriv = Get-Item -LiteralPath $msquicPrivPath
+            Write-Host "Built kernel driver: $($msquicPriv.FullName) ($($msquicPriv.Length) bytes)"
           } finally {
             Pop-Location
           }
 
-          # Copy msquic.sys into the WinQuicEcho km output directory as msquicpriv.sys
-          # for side-by-side installation alongside the inbox msquic.sys.
+          # Copy into the WinQuicEcho km output directory.
           $kmDir = "${{ inputs.build_dir }}/km"
           if (-not (Test-Path $kmDir)) { New-Item -ItemType Directory -Path $kmDir -Force | Out-Null }
-          Copy-Item -LiteralPath $msquicSys.FullName -Destination (Join-Path $kmDir 'msquicpriv.sys') -Force
-          Write-Host "Copied msquic.sys -> msquicpriv.sys in $kmDir"
+          Copy-Item -LiteralPath $msquicPriv.FullName -Destination (Join-Path $kmDir 'msquicpriv.sys') -Force
+          Write-Host "Copied $($msquicPriv.Name) to $kmDir/msquicpriv.sys"
 
       - name: Build kernel driver
         shell: pwsh
