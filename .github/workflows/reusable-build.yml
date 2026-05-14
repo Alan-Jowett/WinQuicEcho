@@ -105,54 +105,53 @@ jobs:
             Write-Host "Populated $wdkBin with SDK tools"
           }
 
-      - name: Build msquicpriv.sys (kernel-mode)
+      - name: Download msquicpriv.sys (kernel-mode)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $msquicSrc = "${{ inputs.build_dir }}/_deps/msquic-src"
-          if (-not (Test-Path $msquicSrc)) {
-            throw "msquic source not found at $msquicSrc — was CMake FetchContent run?"
-          }
+          # Download the pre-built msquicpriv.sys from the msquic team's CI.
+          # Building it ourselves with the NuGet WDK (10.0.26100) produces a
+          # binary that links against newer cng.lib stubs, causing
+          # BCryptOpenAlgorithmProvider(RNG, BCRYPT_PROV_DISPATCH) to fail on
+          # Server 2022. The msquic team builds on windows-2022 runners with
+          # the system WDK, producing a compatible binary.
+          $msquicRef = '${{ inputs.ref }}' 
+          if (-not $msquicRef) { $msquicRef = 'main' }
 
-          Push-Location $msquicSrc
-          try {
-            # Restore NuGet packages for the kernel solution.
-            msbuild msquic.kernel.sln -t:restore /p:RestorePackagesConfig=true /p:Configuration=${{ inputs.config }} /p:Platform=x64
-            if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed with exit code $LASTEXITCODE" }
-
-            # Build the kernel solution. This produces both msquic.sys (inbox-
-            # compatible) and msquicpriv.sys (private/test driver).  We use
-            # msquicpriv.sys for side-by-side installation.
-            msbuild msquic.kernel.sln /m `
-              /p:Configuration=${{ inputs.config }} `
-              /p:Platform=x64 `
-              /p:RunCodeAnalysis=false `
-              /p:CodeAnalysisTreatWarningsAsErrors=false
-            if ($LASTEXITCODE -ne 0) { throw "msquic kernel build failed with exit code $LASTEXITCODE" }
-
-            # Use msquicpriv.sys — the private test driver that the msquic team
-            # uses for JIT kernel-mode testing. Unlike msquic.sys (which mirrors
-            # the inbox driver), msquicpriv.sys is designed for side-by-side
-            # installation and exports the same API surface.
-            $msquicPrivPath = Join-Path $PWD "artifacts/bin/winkernel/x64_${{ inputs.config }}_schannel/msquicpriv.sys"
-            if (-not (Test-Path -LiteralPath $msquicPrivPath)) {
-              # Fall back to msquic.sys if msquicpriv.sys wasn't built
-              $msquicPrivPath = Join-Path $PWD "artifacts/bin/winkernel/x64_${{ inputs.config }}_schannel/msquic.sys"
-              if (-not (Test-Path -LiteralPath $msquicPrivPath)) {
-                throw "Neither msquicpriv.sys nor msquic.sys found in kernel build output"
-              }
-              Write-Host "WARNING: msquicpriv.sys not found, falling back to msquic.sys"
-            }
-            $msquicPriv = Get-Item -LiteralPath $msquicPrivPath
-            Write-Host "Built kernel driver: $($msquicPriv.FullName) ($($msquicPriv.Length) bytes)"
-          } finally {
-            Pop-Location
-          }
-
-          # Copy into the WinQuicEcho km output directory.
           $kmDir = "${{ inputs.build_dir }}/km"
           if (-not (Test-Path $kmDir)) { New-Item -ItemType Directory -Path $kmDir -Force | Out-Null }
+
+          # Find the latest artifact from msquic CI
+          $artifactJson = gh api "repos/microsoft/msquic/actions/artifacts?per_page=1&name=Release-winkernel-windows-2022-x64-schannel" --jq '.artifacts[0] | {id: .id, expired: .expired, created_at: .created_at}' | ConvertFrom-Json
+          if (-not $artifactJson -or $artifactJson.expired) {
+            throw "No valid msquic kernel artifact found"
+          }
+          Write-Host "Downloading msquic kernel artifact (id=$($artifactJson.id), created=$($artifactJson.created_at))"
+
+          $zipPath = Join-Path $env:TEMP "msquic-winkernel.zip"
+          $extractPath = Join-Path $env:TEMP "msquic-winkernel"
+          gh api "repos/microsoft/msquic/actions/artifacts/$($artifactJson.id)/zip" > $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+          # Find msquicpriv.sys in the extracted artifact
+          $msquicPriv = Get-ChildItem -Path $extractPath -Recurse -Filter 'msquicpriv.sys' |
+            Where-Object { $_.DirectoryName -notmatch 'kernel\\' } |
+            Select-Object -First 1
+          if (-not $msquicPriv) {
+            # Try any msquicpriv.sys
+            $msquicPriv = Get-ChildItem -Path $extractPath -Recurse -Filter 'msquicpriv.sys' | Select-Object -First 1
+          }
+          if (-not $msquicPriv) {
+            throw "msquicpriv.sys not found in downloaded artifact"
+          }
+
           Copy-Item -LiteralPath $msquicPriv.FullName -Destination (Join-Path $kmDir 'msquicpriv.sys') -Force
-          Write-Host "Copied $($msquicPriv.Name) to $kmDir/msquicpriv.sys"
+          Write-Host "Downloaded msquicpriv.sys ($($msquicPriv.Length) bytes) to $kmDir"
+
+          # Cleanup
+          Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+          Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Build kernel driver
         shell: pwsh
